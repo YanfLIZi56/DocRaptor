@@ -10,10 +10,15 @@ spring:
       base-url: ${API_URL}
       api-key: ${API_KEY}
       chat:
-        model: qwen3.7-flash
+        model: ${ai.model.chat}
       embedding:
-        model: qwen3.7-text-embedding
+        model: ${ai.model.embedding}
         dimensions: 1536
+    # 本项目不使用 Spring AI 的 PgVectorStore（统一节点表 summary_nodes 已自带 HNSW 索引），
+    # 显式关掉其建表行为，避免在 doc_raptor_db 里创建多余的 vector_store 表。
+    vectorstore:
+      pgvector:
+        initialize-schema: false
 
   # 连接数据库
   datasource:
@@ -30,16 +35,98 @@ spring:
       # 设置总上传的文件大小
       max-request-size: 20MB
 
-  data:
-    redis:
-      host: ${redis.host}
-      port: ${redis.port}
-      database: ${redis.database}
-      timeout: 10s
-
 # MyBatis配置
 mybatis:
   # 配置mapper的扫描，找到所有的mapper.xml映射文件
   mapper-locations: classpath*:mapper/**/*.xml
   # 加载全局的配置文件
   configLocation: classpath:mybatis/mybatis-config.xml
+
+# ============================================================================
+# DocRaptor 业务配置（developer 追加，对应 docs/01-architecture.md 第 8 节配置表）
+# 均为「接口未传参时的默认值」；实际建树使用的聚类参数会写入 summary_nodes.metadata
+# ============================================================================
+docraptor:
+  chunk:
+    size: 512
+    overlap: 64
+    strategy: FIXED_SIZE
+    min-chunk-chars: 32
+    normalize-whitespace: true
+  embedding:
+    batch-size: 32
+    dimensions: 1536
+    max-retries: 3
+    retry-backoff-ms: 1000
+    timeout-ms: 30000
+  raptor:
+    max-level: 3
+    min-cluster-size: 2
+    summary-concurrency: 4
+    rebuild-on-conflict: true
+    umap:
+      enabled: true
+      # ⚠️ 必须 < 当前层节点数：nNeighbors >= n 时 shouldReduce 为 false，会直接跳过降维。
+      # 一篇 6000 字文档按 600 字分块约 11 块，因此这里取 5。
+      n-neighbors: 5
+      min-dist: 0.05
+      # ⚠️ 目标维度受严格约束 2d+3 < n（Smile 4.1.0 谱初始化 NEV=2d+3）。
+      # n=11 时 d 只能是 2 或 3；取 10 会抛 Invalid NEV parameter，降级后 GMM 在 1536 维必然失败 → 单簇 → 树无层次。
+      n-components: 2
+      metric: cosine
+      epochs: 200
+      learning-rate: 1.0
+      spread: 1.0
+      negative-samples: 5
+      repulsion-strength: 1.0
+      local-connectivity: 1.0
+      # 注意：smile 4.1.0 的 smile.manifold.UMAP 没有随机种子参数，无法固定随机性
+      random-state: 42
+    gmm:
+      max-clusters: 8
+      # 簇数「绝对」上限：在 max-clusters 之上再压一层。
+      # ⚠️ 实测 BIC 在合成数据上随 k 单调下降、会一路选到上限，摘要会退化成对单个块的复述，
+      # 所以必须同时用 ceil(sqrt(n)) 与本值硬顶住（Lead 推荐 6）。
+      # 实际生效值 = max(2, min(max-clusters, absolute-max-clusters, ceil(sqrt(n))))。
+      absolute-max-clusters: 6
+      min-clusters: 2
+      covariance-type: diagonal
+      random-state: 42
+      selection: BIC
+  summary:
+    max-summary-chars: 400
+    max-input-chars: 12000
+    max-retries: 3
+    temperature: 0.2
+    enable-thinking: false
+    max-tokens: 1024
+    degraded-member-chars: 200
+  retrieval:
+    default-mode: HYBRID
+    default-top-k: 10
+    max-top-k: 100
+    default-similarity-threshold: 0.0
+    default-hybrid-ratio: 0.5
+    default-bm25-weight: 1.0
+    default-rrf-k: 60
+    default-scope: ALL_LEVELS
+    candidate-multiplier: 3
+    candidate-max: 200
+    hnsw-ef-search: 100
+    fold-tree: true
+    log-enabled: true
+  import-config:
+    storage-dir: ./data/upload
+    max-file-size-mb: 10
+    allowed-extensions: pdf,docx,md,markdown,txt
+    max-parse-chars: 2000000
+    auto-build-tree: true
+  async:
+    core-pool-size: 2
+    max-pool-size: 4
+    queue-capacity: 100
+    heartbeat-stale-seconds: 300
+  eval:
+    default-k-list: 1,3,5,10
+    max-sync-cases: 50
+

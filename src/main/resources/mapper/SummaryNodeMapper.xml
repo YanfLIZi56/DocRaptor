@@ -1,0 +1,266 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  summary_nodes 统一节点表：向量检索 / BM25 检索 / 树结构查询。
+  实测要点（docs/00-environment-facts.md 2.1 / 2.2）：
+    · 向量：ORDER BY embedding <=> ?::vector，相似度 = 1 - (embedding <=> ?::vector)
+    · BM25：id @@@ paradedb.match('content', ?) + paradedb.score(id)（一张表只能有一个 bm25 索引）
+    · 向量参数统一以字符串 '[a,b,c]' 传入并 CAST(... AS vector)，避免依赖 PGvector 自定义类型
+-->
+<mapper namespace="com.yanglizi.docraptor.mapper.SummaryNodeMapper">
+
+    <!-- ============================ 写入 ============================ -->
+
+    <insert id="insertLeaf" parameterType="com.yanglizi.docraptor.domain.entity.SummaryNode">
+        INSERT INTO summary_nodes
+            (id, knowledge_base_id, document_id, parent_id, node_type, level, chunk_index,
+             start_chunk_index, end_chunk_index, content, char_count, token_count, metadata)
+        VALUES
+            (#{id}, #{knowledgeBaseId}, #{documentId}, #{parentId}, 'LEAF', 0, #{chunkIndex},
+             #{startChunkIndex}, #{endChunkIndex}, #{content}, #{charCount}, #{tokenCount},
+             CAST(#{metadata} AS jsonb))
+    </insert>
+
+    <insert id="insertLeaves">
+        INSERT INTO summary_nodes
+            (id, knowledge_base_id, document_id, parent_id, node_type, level, chunk_index,
+             start_chunk_index, end_chunk_index, content, char_count, token_count, metadata)
+        VALUES
+        <foreach collection="list" item="n" separator=",">
+            (#{n.id}, #{n.knowledgeBaseId}, #{n.documentId}, #{n.parentId}, 'LEAF', 0, #{n.chunkIndex},
+             #{n.startChunkIndex}, #{n.endChunkIndex}, #{n.content}, #{n.charCount}, #{n.tokenCount},
+             CAST(#{n.metadata} AS jsonb))
+        </foreach>
+    </insert>
+
+    <insert id="insertSummary" parameterType="com.yanglizi.docraptor.domain.entity.SummaryNode">
+        INSERT INTO summary_nodes
+            (id, knowledge_base_id, document_id, parent_id, node_type, level,
+             start_chunk_index, end_chunk_index, content, summary, char_count, token_count,
+             embedding, cluster_label, cluster_size, metadata)
+        VALUES
+            (#{id}, #{knowledgeBaseId}, #{documentId}, #{parentId}, 'SUMMARY', #{level},
+             #{startChunkIndex}, #{endChunkIndex}, #{content}, #{summary}, #{charCount}, #{tokenCount},
+             CAST(#{embedding} AS vector), #{clusterLabel}, #{clusterSize}, CAST(#{metadata} AS jsonb))
+    </insert>
+
+    <update id="updateEmbedding">
+        UPDATE summary_nodes SET embedding = CAST(#{embedding} AS vector) WHERE id = #{id}
+    </update>
+
+    <update id="updateParentForIds">
+        UPDATE summary_nodes SET parent_id = #{parentId}
+        WHERE id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">#{id}</foreach>
+    </update>
+
+    <update id="resetLeafParents">
+        UPDATE summary_nodes SET parent_id = NULL
+        WHERE document_id = #{documentId} AND node_type = 'LEAF'
+    </update>
+
+    <delete id="deleteSummariesByDocument">
+        DELETE FROM summary_nodes WHERE document_id = #{documentId} AND node_type = 'SUMMARY'
+    </delete>
+
+    <update id="updateMetadata">
+        UPDATE summary_nodes SET metadata = CAST(#{metadata} AS jsonb) WHERE id = #{id}
+    </update>
+
+    <!-- ============================ 建树读取 ============================ -->
+
+    <select id="selectLeavesWithEmbedding" resultType="com.yanglizi.docraptor.domain.entity.SummaryNode">
+        SELECT * FROM summary_nodes
+        WHERE document_id = #{documentId} AND node_type = 'LEAF' AND embedding IS NOT NULL
+        ORDER BY chunk_index
+    </select>
+
+    <select id="selectLeavesByDocument" resultType="com.yanglizi.docraptor.domain.entity.SummaryNode">
+        SELECT * FROM summary_nodes
+        WHERE document_id = #{documentId} AND node_type = 'LEAF'
+        ORDER BY chunk_index
+    </select>
+
+    <select id="selectLeavesWithoutEmbedding" resultType="com.yanglizi.docraptor.domain.entity.SummaryNode">
+        SELECT * FROM summary_nodes
+        WHERE document_id = #{documentId} AND node_type = 'LEAF' AND embedding IS NULL
+        ORDER BY chunk_index
+    </select>
+
+    <select id="selectAllByDocument" resultType="com.yanglizi.docraptor.domain.entity.SummaryNode">
+        SELECT * FROM summary_nodes
+        WHERE document_id = #{documentId}
+        ORDER BY level, chunk_index NULLS LAST, created_at
+    </select>
+
+    <select id="selectSummaryNodesByDocument" resultType="com.yanglizi.docraptor.domain.entity.SummaryNode">
+        SELECT * FROM summary_nodes
+        WHERE document_id = #{documentId} AND node_type = 'SUMMARY'
+        ORDER BY level, created_at
+    </select>
+
+    <select id="selectByIds" resultType="com.yanglizi.docraptor.domain.entity.SummaryNode">
+        SELECT * FROM summary_nodes
+        WHERE id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">#{id}</foreach>
+    </select>
+
+    <!-- ============================ 向量路 ============================ -->
+
+    <sql id="searchCommonFilters">
+        AND s.knowledge_base_id = #{kbId}
+        <if test="leafOnly">AND s.node_type = 'LEAF'</if>
+        <if test="specifiedLevel">
+            AND s.level IN
+            <foreach collection="levels" item="lv" open="(" separator="," close=")">#{lv}</foreach>
+        </if>
+        <if test="documentIds != null and documentIds.size() > 0">
+            AND s.document_id IN
+            <foreach collection="documentIds" item="did" open="(" separator="," close=")">#{did}</foreach>
+        </if>
+    </sql>
+
+    <select id="vectorSearch" resultType="com.yanglizi.docraptor.domain.dto.SearchRow">
+        SELECT s.id                     AS node_id,
+               s.node_type              AS node_type,
+               s.level                  AS level,
+               s.document_id            AS document_id,
+               d.file_name              AS document_name,
+               d.enabled                AS document_enabled,
+               s.chunk_index            AS chunk_index,
+               s.start_chunk_index      AS start_chunk_index,
+               s.end_chunk_index        AS end_chunk_index,
+               s.char_count             AS char_count,
+               s.content                AS content,
+               1 - (s.embedding &lt;=&gt; CAST(#{queryVector} AS vector)) AS raw_score
+        FROM summary_nodes s
+        JOIN document d ON d.id = s.document_id AND d.enabled = TRUE
+        WHERE s.embedding IS NOT NULL
+        <include refid="searchCommonFilters"/>
+        ORDER BY s.embedding &lt;=&gt; CAST(#{queryVector} AS vector)
+        LIMIT #{limit}
+    </select>
+
+    <!-- ============================ BM25 路 ============================ -->
+
+    <!--
+      ⚠️ BM25 写法是硬性约束，别改（docs/00-environment-facts.md 2.3，Lead 用真实语料 5 条中文问句实测）：
+        · WHERE 必须是 s.id @@@ paradedb.match('content', #{query})
+          （表达式索引建在 id 上即 key_field，不要写 content @@@ ...）
+        · 排序必须是 ORDER BY paradedb.score(s.id) DESC
+        · 禁止 paradedb.parse('content:' || ?) 与 content @@@ ?
+          —— 这两种会把参数当「ParadeDB 查询语法串」解析，中文问句里的 ？、，、会被误解释，
+             整条查询静默失效（Lead 实测 5 条问句里 2 条零命中）。
+          paradedb.match 是把参数当纯文本分词匹配，对自然语言问句稳定。
+      回归防线：Bm25SearchIntegrationTest 用带 ？和、的完整问句断言命中数 > 0。
+    -->
+    <select id="bm25Search" resultType="com.yanglizi.docraptor.domain.dto.SearchRow">
+        SELECT s.id                     AS node_id,
+               s.node_type              AS node_type,
+               s.level                  AS level,
+               s.document_id            AS document_id,
+               d.file_name              AS document_name,
+               d.enabled                AS document_enabled,
+               s.chunk_index            AS chunk_index,
+               s.start_chunk_index      AS start_chunk_index,
+               s.end_chunk_index        AS end_chunk_index,
+               s.char_count             AS char_count,
+               s.content                AS content,
+               paradedb.score(s.id)     AS raw_score
+        FROM summary_nodes s
+        JOIN document d ON d.id = s.document_id AND d.enabled = TRUE
+        WHERE s.id @@@ paradedb.match('content', #{query})
+        <include refid="searchCommonFilters"/>
+        ORDER BY paradedb.score(s.id) DESC
+        LIMIT #{limit}
+    </select>
+
+    <!-- ============================ 折叠树 ============================ -->
+
+    <select id="selectIdParentPairs" resultType="com.yanglizi.docraptor.domain.dto.NodeParentPair">
+        SELECT id, parent_id FROM summary_nodes WHERE knowledge_base_id = #{kbId}
+    </select>
+
+    <!-- ============================ 分块列表 ============================ -->
+
+    <select id="selectLeafChunks" resultType="com.yanglizi.docraptor.domain.dto.ChunkRow">
+        SELECT s.id               AS node_id,
+               s.document_id      AS document_id,
+               d.file_name        AS document_name,
+               s.knowledge_base_id AS knowledge_base_id,
+               s.node_type        AS node_type,
+               s.level            AS level,
+               s.chunk_index      AS chunk_index,
+               s.start_chunk_index AS start_chunk_index,
+               s.end_chunk_index  AS end_chunk_index,
+               s.char_count       AS char_count,
+               s.token_count      AS token_count,
+               s.parent_id        AS parent_id,
+               (s.embedding IS NOT NULL) AS has_embedding,
+               vector_dims(s.embedding)  AS embedding_dimension,
+               left(s.embedding::text, 320) AS embedding_preview,
+               s.content          AS content,
+               s.created_at       AS created_at
+        FROM summary_nodes s
+        LEFT JOIN document d ON d.id = s.document_id
+        WHERE s.node_type = 'LEAF'
+        <if test="documentId != null">AND s.document_id = #{documentId}</if>
+        <if test="documentId == null and kbId != null">AND s.knowledge_base_id = #{kbId}</if>
+        ORDER BY s.document_id, s.chunk_index
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <select id="countLeafChunks" resultType="long">
+        SELECT count(*)
+        FROM summary_nodes s
+        WHERE s.node_type = 'LEAF'
+        <if test="documentId != null">AND s.document_id = #{documentId}</if>
+        <if test="documentId == null and kbId != null">AND s.knowledge_base_id = #{kbId}</if>
+    </select>
+
+    <!-- ============================ 统计 ============================ -->
+
+    <select id="selectLevelCounts" resultType="com.yanglizi.docraptor.domain.dto.LevelCount">
+        SELECT level AS level, count(*) AS count
+        FROM summary_nodes
+        WHERE document_id = #{documentId}
+        GROUP BY level
+        ORDER BY level
+    </select>
+
+    <select id="countByKnowledgeBase" resultType="long">
+        SELECT count(*) FROM summary_nodes WHERE knowledge_base_id = #{kbId}
+    </select>
+
+    <select id="countByDocumentAndType" resultType="long">
+        SELECT count(*) FROM summary_nodes WHERE document_id = #{documentId} AND node_type = #{nodeType}
+    </select>
+
+    <select id="countByDocumentAndLevel" resultType="long">
+        SELECT count(*) FROM summary_nodes WHERE document_id = #{documentId} AND level = #{level}
+    </select>
+
+    <delete id="deleteByKnowledgeBase">
+        DELETE FROM summary_nodes WHERE knowledge_base_id = #{kbId}
+    </delete>
+
+    <select id="selectRootMetadata" resultType="string">
+        SELECT metadata::text FROM summary_nodes
+        WHERE document_id = #{documentId} AND node_type = 'SUMMARY' AND parent_id IS NULL
+        ORDER BY level DESC, cluster_size DESC NULLS LAST
+        LIMIT 1
+    </select>
+
+    <select id="countByMetadataFlag" resultType="long">
+        SELECT count(*) FROM summary_nodes
+        WHERE document_id = #{documentId} AND node_type = 'SUMMARY' AND metadata ->> #{key} = 'true'
+    </select>
+
+    <select id="selectAvgClusterSize" resultType="java.lang.Double">
+        SELECT avg(cluster_size) FROM summary_nodes
+        WHERE document_id = #{documentId} AND node_type = 'SUMMARY'
+    </select>
+
+</mapper>

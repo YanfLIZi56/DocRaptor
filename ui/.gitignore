@@ -37,3 +37,6 @@ __screenshots__/
 
 # Vite
 *.timestamp-*-*.mjs
+
+# 构建/类型检查验证输出（frontend-dev 用于留证）
+.build-verify.txt

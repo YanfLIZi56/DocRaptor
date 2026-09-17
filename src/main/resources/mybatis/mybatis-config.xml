@@ -9,5 +9,17 @@ PUBLIC "-//mybatis.org//DTD Config 3.0//EN"
         <!-- 使用驼峰命名法转换字段 -->
 		 <setting name="mapUnderscoreToCamelCase" value="true"/>
 	</settings>
-	
+
+    <!--
+      类型处理器。
+      ⚠️ 必须注册：MyBatis 3.5.19 **没有**内置 UUIDTypeHandler（org.apache.ibatis.type 下 45 个 handler 里没有它），
+      且 UUID 的父类是 Object，MyBatis 的父类查找遇到 Object 会直接返回 null，
+      导致 #{uuidParam} 解析不到 handler，在构建 SqlSessionFactory 时抛：
+        IllegalStateException: Type handler was null on parameter mapping for property '...'
+      那会让整个 Spring 上下文启动失败（实测可复现）。
+    -->
+    <typeHandlers>
+        <typeHandler handler="com.yanglizi.docraptor.common.UuidTypeHandler" javaType="java.util.UUID"/>
+    </typeHandlers>
+
 </configuration>

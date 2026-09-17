@@ -31,3 +31,22 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### DocRaptor 项目本地约定 ###
+# 工作区内的 Maven 本地仓库（沙箱要求，体积大，不入库）
+.m2repo/
+# 探查/验证用的临时脚本与输出
+.scratch/
+.arch-tmp/
+.probe2/
+# 日志（含调试期间在根目录落下的 mvn/探针输出）
+*.log
+logs/
+/logs-*.txt
+/*.txt
+# 文档上传落盘目录（运行时数据，不入库）
+/data/
+# 前端构建产物
+ui/dist/
+ui/node_modules/
+ui/.build-verify.txt

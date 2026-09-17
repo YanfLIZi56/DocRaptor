@@ -6,6 +6,9 @@
     // Extra safety for array and object lookups, but may have false positives.
     "noUncheckedIndexedAccess": true,
 
+    // 让 vue-tsc 认识 <el-xxx> 全局组件（Element Plus 全量引入），模板里的 props / v-model 才有真实类型校验。
+    "types": ["element-plus/global"],
+
     // Path mapping for cleaner imports.
     "paths": {
       "@/*": ["./src/*"]

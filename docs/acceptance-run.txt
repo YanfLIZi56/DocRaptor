@@ -1,0 +1,229 @@
+==============================================================================
+DocRaptor 端到端验收
+时间: 2026-09-17T15:37:02.551Z
+API : http://localhost:8080/api
+==============================================================================
+
+[0] 后端就绪，耗时 52ms
+
+[1] 复用已有知识库: 5e469e4c-a954-474d-8d56-8339d71b9ea2 (RAPTOR 验收知识库)
+    chunkSize=600 overlap=80 strategy=RECURSIVE dim=1536
+
+[2] 导入文档 raptor-guide.md：总字符 6109，中文字符 5254
+    上传成功 documentId=0c91fe2c-a98e-484c-9835-47207ecd054d taskId=6a9896a0-6d72-474d-bb5d-1739e0a5a61b fileType=MARKDOWN size=17507
+    [task] RUNNING/PARSE/2 正在解析文档 raptor-guide.md
+    [task] RUNNING/TREE_BUILD/70 已清理旧摘要节点，开始聚类
+    [task] RUNNING/TREE_BUILD/78 已完成 level=1 摘要，本层 3 个节点
+    [task] SUCCESS/DONE/100 已完成 level=1 摘要，本层 3 个节点
+    导入任务终态: SUCCESS progress=100
+    文档状态: embedStatus=SUCCESS treeStatus=SUCCESS chunkCount=11
+
+[3] 分块结果：共 11 块
+    来源文档ID/块序号/字符数 三要素缺失的块数: 0  ✔
+      #  0 doc=0c91fe2c… chars= 595 embed=true parent=a0c02ab8…
+      #  1 doc=0c91fe2c… chars= 677 embed=true parent=a0c02ab8…
+      #  2 doc=0c91fe2c… chars= 653 embed=true parent=3832ee3c…
+      #  3 doc=0c91fe2c… chars= 593 embed=true parent=3832ee3c…
+      #  4 doc=0c91fe2c… chars= 544 embed=true parent=6a01b93d…
+      #  5 doc=0c91fe2c… chars= 678 embed=true parent=6a01b93d…
+      #  6 doc=0c91fe2c… chars= 596 embed=true parent=6a01b93d…
+      #  7 doc=0c91fe2c… chars= 569 embed=true parent=a0c02ab8…
+      #  8 doc=0c91fe2c… chars= 671 embed=true parent=3832ee3c…
+      #  9 doc=0c91fe2c… chars= 571 embed=true parent=3832ee3c…
+      # 10 doc=0c91fe2c… chars= 657 embed=true parent=3832ee3c…
+
+[4] RAPTOR 树统计: {
+  "actualDepth": 2,
+  "avgClusterSize": 3.5,
+  "buildDurationMs": 5915,
+  "builtAt": 1789659429390,
+  "degradedSummaryCount": 0,
+  "documentId": "0c91fe2c-a98e-484c-9835-47207ecd054d",
+  "forcedRoot": false,
+  "hasUniqueRoot": true,
+  "levelCounts": [
+    {
+      "count": 11,
+      "level": 0
+    },
+    {
+      "count": 3,
+      "level": 1
+    },
+    {
+      "count": 1,
+      "level": 2
+    }
+  ],
+  "maxLevel": 3,
+  "rootCount": 1,
+  "treeStatus": "SUCCESS"
+}
+    扁平节点数=15 各层节点数={
+  "0": 11,
+  "1": 3,
+  "2": 1
+}
+    接口自报: nodeCount=15 leafNodeCount=11 summaryNodeCount=4 actualDepth=2 rootNodeId=43d84750-9e66-4873-a262-01f54e743ba4
+    展开得到摘要节点数=4
+      L2 [0~10] RAPTOR旨在解决传统切分导致的语义断裂与宏观检索不足，通过自底向上递归构建语义树，由大语言模型生成摘要作为父节点以支持任意抽象层次检索。工程实现中，分块策略…
+      L1 [0~7] RAPTOR（Recursive Abstractive Processing for Tree-Organized Retrieval）旨在解决传统固定长度切…
+      L1 [2~10] 分块策略包括固定长度、递归字符及结构感知三种，中文单块建议五百至八百字，重叠度百分之十至二十，需保留偏移量等元数据以支持回溯与评估。向量化需权衡维度、语言覆盖与…
+      L1 [4~6] 归一化状态不一致导致分数不可比，需统一状态并匹配距离算子。UMAP 用于解决高维维度灾难，通过构建最近邻图保留非线性语义结构，其参数 n_neighbors 平…
+    摘要节点中 document_id 为空的个数 = 0 ✔
+    摘要层级 = [1, 2]，叶子 11 个，摘要 4 个，actualDepth=2
+
+[5] 三模式检索对比，查询: 「RAPTOR 如何用 UMAP 降维和 GMM 聚类构建递归摘要树？」
+
+    --- VECTOR (costMs=345, totalHits=5, collapsed=8) ---
+      #1 score=0.743735 L1 SUMMARY vRank=1 vScore=0.7437 bRank=- bScore=- :: 归一化状态不一致导致分数不可比，需统一状态并匹配距离算子。UMAP 用于解决高维维度灾难，通过构建最近邻图保留非线性语义
+      #2 score=0.709634 L1 SUMMARY vRank=4 vScore=0.7096 bRank=- bScore=- :: RAPTOR（Recursive Abstractive Processing for Tree-Organized R
+      #3 score=0.493498 L0 LEAF vRank=10 vScore=0.4935 bRank=- bScore=- :: 回溯原文定位时不可或缺，顺序号则决定了检索结果能否按原文顺序重排。缺少这些字段，后续做可解释的召回展示和召回率评估都会非
+      #4 score=0.491962 L0 LEAF vRank=11 vScore=0.4920 bRank=- bScore=- :: 叙述性的语料则更依赖语义匹配。## 九、评估指标的定义与意义没有量化评估，参数调优就是盲猜。RAPTOR 场景下最常用的
+      #5 score=0.484652 L0 LEAF vRank=12 vScore=0.4847 bRank=- bScore=- :: 思时，向量检索依然能找到相关内容，这是关键词检索做不到的。它的短板是对精确匹配不敏感：专有名词、编号、代码标识符这类信息
+
+    --- BM25 (costMs=11, totalHits=5, collapsed=4) ---
+      #1 score=24.699184 L0 LEAF vRank=- vScore=- bRank=1 bScore=24.6992 :: 间中点与点之间的最小距离：值越小，点越倾向于紧聚成团，簇内更紧凑，适合聚类；值越大，布局越松散，更适合可视化展示。做聚类
+      #2 score=22.941242 L0 LEAF vRank=- vScore=- bRank=3 bScore=22.9412 :: 体段落。检索系统如果只提供段落级别的入口，就等于取消了目录这一层。用户提出宏观问题时，系统手里没有与之匹配的抽象层次可供
+      #3 score=19.517708 L0 LEAF vRank=- vScore=- bRank=5 bScore=19.5177 :: 归一化状态不一致会导致分数不可比。统一的工程做法是在写入前保证所有向量处于同一归一化状态，并在检索时使用与之匹配的距离算
+      #4 score=15.993764 L0 LEAF vRank=- vScore=- bRank=6 bScore=15.9938 :: 避免选出过多琐碎的簇。工程实现里必须同时设定最小簇数与最大簇数，最小簇数保证不会只切出一个簇，最大簇数防止在大规模数据上
+      #5 score=14.558182 L0 LEAF vRank=- vScore=- bRank=7 bScore=14.5582 :: 叙述性的语料则更依赖语义匹配。## 九、评估指标的定义与意义没有量化评估，参数调优就是盲猜。RAPTOR 场景下最常用的
+
+    --- HYBRID (costMs=128, totalHits=5, collapsed=8) ---
+      #1 score=0.016261 L1 SUMMARY vRank=1 vScore=0.7437 bRank=2 bScore=24.3594 :: 归一化状态不一致导致分数不可比，需统一状态并匹配距离算子。UMAP 用于解决高维维度灾难，通过构建最近邻图保留非线性语义
+      #2 score=0.015625 L1 SUMMARY vRank=4 vScore=0.7097 bRank=4 bScore=21.4460 :: RAPTOR（Recursive Abstractive Processing for Tree-Organized R
+      #3 score=0.014505 L0 LEAF vRank=11 vScore=0.4919 bRank=7 bScore=14.5582 :: 叙述性的语料则更依赖语义匹配。## 九、评估指标的定义与意义没有量化评估，参数调优就是盲猜。RAPTOR 场景下最常用的
+      #4 score=0.014297 L0 LEAF vRank=12 vScore=0.4847 bRank=8 bScore=13.1883 :: 思时，向量检索依然能找到相关内容，这是关键词检索做不到的。它的短板是对精确匹配不敏感：专有名词、编号、代码标识符这类信息
+      #5 score=0.014096 L0 LEAF vRank=13 vScore=0.4530 bRank=9 bScore=12.5366 :: 的语义层次显式地提取了出来，并且用向量空间中的邻近关系来表达这种层次。当原文本身结构混乱、缺少小标题、或者是由多个来源拼
+
+    重叠: V∩B=1/5  V∩H=4/5  B∩H=1/5
+    向量与BM25 顺序完全相同: false / 集合完全相同: false
+    召回结果携带层级信息(level/nodeType): ✔
+
+[5] 三模式检索对比，查询: 「那套把文档层层浓缩成树的做法，到底是怎么一步步做出来的？」
+
+    --- VECTOR (costMs=155, totalHits=5, collapsed=4) ---
+      #1 score=0.672986 L0 LEAF vRank=1 vScore=0.6730 bRank=- bScore=- :: 仅基于所提供的文本块进行总结，禁止添加任何未在原文中出现的信息，只做信息压缩，不添加新事实。同时要求保留关键实体、数字和
+      #2 score=0.620278 L0 LEAF vRank=3 vScore=0.6203 bRank=- bScore=- :: 体段落。检索系统如果只提供段落级别的入口，就等于取消了目录这一层。用户提出宏观问题时，系统手里没有与之匹配的抽象层次可供
+      #3 score=0.605600 L0 LEAF vRank=4 vScore=0.6056 bRank=- bScore=- :: 避免选出过多琐碎的簇。工程实现里必须同时设定最小簇数与最大簇数，最小簇数保证不会只切出一个簇，最大簇数防止在大规模数据上
+      #4 score=0.560957 L0 LEAF vRank=6 vScore=0.5610 bRank=- bScore=- :: 的语义层次显式地提取了出来，并且用向量空间中的邻近关系来表达这种层次。当原文本身结构混乱、缺少小标题、或者是由多个来源拼
+      #5 score=0.521287 L0 LEAF vRank=7 vScore=0.5213 bRank=- bScore=- :: # RAPTOR 递归摘要检索技术指南## 一、长文档检索面临的真实困境传统检索增强生成系统处理长文档时，通常采用固定长
+
+    --- BM25 (costMs=11, totalHits=5, collapsed=4) ---
+      #1 score=17.069744 L0 LEAF vRank=- vScore=- bRank=1 bScore=17.0697 :: 体段落。检索系统如果只提供段落级别的入口，就等于取消了目录这一层。用户提出宏观问题时，系统手里没有与之匹配的抽象层次可供
+      #2 score=15.608343 L0 LEAF vRank=- vScore=- bRank=2 bScore=15.6083 :: 。此外，测试集里期望块的标注质量决定了评估结论的可信度，标注本身需要人工确认，不能由系统自动生成，否则评估就变成了自我循
+      #3 score=15.353989 L0 LEAF vRank=- vScore=- bRank=3 bScore=15.3540 :: 避免选出过多琐碎的簇。工程实现里必须同时设定最小簇数与最大簇数，最小簇数保证不会只切出一个簇，最大簇数防止在大规模数据上
+      #4 score=15.323009 L0 LEAF vRank=- vScore=- bRank=4 bScore=15.3230 :: 思时，向量检索依然能找到相关内容，这是关键词检索做不到的。它的短板是对精确匹配不敏感：专有名词、编号、代码标识符这类信息
+      #5 score=15.055861 L0 LEAF vRank=- vScore=- bRank=5 bScore=15.0559 :: 的语义层次显式地提取了出来，并且用向量空间中的邻近关系来表达这种层次。当原文本身结构混乱、缺少小标题、或者是由多个来源拼
+
+    --- HYBRID (costMs=137, totalHits=5, collapsed=4) ---
+      #1 score=0.016133 L0 LEAF vRank=3 vScore=0.6203 bRank=1 bScore=17.0697 :: 体段落。检索系统如果只提供段落级别的入口，就等于取消了目录这一层。用户提出宏观问题时，系统手里没有与之匹配的抽象层次可供
+      #2 score=0.015749 L0 LEAF vRank=4 vScore=0.6056 bRank=3 bScore=15.3540 :: 避免选出过多琐碎的簇。工程实现里必须同时设定最小簇数与最大簇数，最小簇数保证不会只切出一个簇，最大簇数防止在大规模数据上
+      #3 score=0.015417 L0 LEAF vRank=8 vScore=0.4994 bRank=2 bScore=15.6083 :: 。此外，测试集里期望块的标注质量决定了评估结论的可信度，标注本身需要人工确认，不能由系统自动生成，否则评估就变成了自我循
+      #4 score=0.015340 L0 LEAF vRank=1 vScore=0.6730 bRank=10 bScore=13.3331 :: 仅基于所提供的文本块进行总结，禁止添加任何未在原文中出现的信息，只做信息压缩，不添加新事实。同时要求保留关键实体、数字和
+      #5 score=0.015268 L0 LEAF vRank=6 vScore=0.5610 bRank=5 bScore=15.0559 :: 的语义层次显式地提取了出来，并且用向量空间中的邻近关系来表达这种层次。当原文本身结构混乱、缺少小标题、或者是由多个来源拼
+
+    重叠: V∩B=3/5  V∩H=4/5  B∩H=4/5
+    向量与BM25 顺序完全相同: false / 集合完全相同: false
+    召回结果携带层级信息(level/nodeType): ✔
+
+[6] 召回率评估（期望块由源文档小节锚点推导，非检索自证）
+    用例「长文档检索困境」创建 21df2948… 期望块 1 个
+    用例「RAPTOR核心思想」创建 b9f3299a… 期望块 1 个
+    用例「分块策略取舍」创建 cd8ec627… 期望块 1 个
+    用例「UMAP参数」创建 e02fe23c… 期望块 2 个
+    用例「GMM簇数」创建 6dede519… 期望块 2 个
+    用例「递归摘要与树」创建 06bc07a3… 期望块 1 个
+    用例「混合检索RRF」创建 6188ce93… 期望块 2 个
+    用例「评估指标」创建 4b165c29… 期望块 2 个
+    用例「异步与可观测性」创建 cfac7934… 期望块 2 个
+    有效用例数: 9 / 9
+
+    --- VECTOR / LEAF_ONLY : 评估 9 用例, 平均耗时 293ms ---
+        K    Recall   HitRate   MRR
+        1     0.6667    0.8889  0.8889
+        3     0.8889    1.0000  0.9444
+        5     0.8889    1.0000  0.9444
+        10    1.0000    1.0000  0.9444
+
+    --- VECTOR / ALL_LEVELS : 评估 9 用例, 平均耗时 249ms ---
+        K    Recall   HitRate   MRR
+        1     0.5556    0.7778  0.7778
+        3     0.7778    0.8889  0.8333
+        5     0.7778    0.8889  0.8333
+        10    0.8889    0.8889  0.8333
+
+    --- BM25 / LEAF_ONLY : 评估 9 用例, 平均耗时 10ms ---
+        K    Recall   HitRate   MRR
+        1     0.7222    1.0000  1.0000
+        3     0.8333    1.0000  1.0000
+        5     0.8333    1.0000  1.0000
+        10    1.0000    1.0000  1.0000
+
+    --- BM25 / ALL_LEVELS : 评估 9 用例, 平均耗时 11ms ---
+        K    Recall   HitRate   MRR
+        1     0.6667    0.8889  0.8889
+        3     0.7778    0.8889  0.8889
+        5     0.7778    0.8889  0.8889
+        10    0.9444    1.0000  0.9074
+
+    --- HYBRID / LEAF_ONLY : 评估 9 用例, 平均耗时 181ms ---
+        K    Recall   HitRate   MRR
+        1     0.6667    0.8889  0.8889
+        3     0.8333    1.0000  0.9444
+        5     0.8889    1.0000  0.9444
+        10    1.0000    1.0000  0.9444
+
+    --- HYBRID / ALL_LEVELS : 评估 9 用例, 平均耗时 158ms ---
+        K    Recall   HitRate   MRR
+        1     0.6667    0.8889  0.8889
+        3     0.8333    1.0000  0.9259
+        5     0.8333    1.0000  0.9259
+        10    0.9444    1.0000  0.9259
+
+==============================================================================
+验收结论
+==============================================================================
+  ✔ PASS  A 导入 5000+ 字文档并自动分块/向量化/构建有层次的摘要树
+  ✔ PASS  B 召回结果携带层级信息
+  ✔ PASS  C 三模式召回结果有差异
+  ✔ PASS  D 混合检索 Recall@5 > 60% (LEAF_ONLY)
+
+  混合检索 LEAF_ONLY Recall@5 = 88.9% (阈值 60%)
+  VECTOR Recall@5  LEAF_ONLY=88.9%  ALL_LEVELS=77.8%
+  BM25   Recall@5  LEAF_ONLY=83.3%  ALL_LEVELS=77.8%
+  HYBRID Recall@5  LEAF_ONLY=88.9%  ALL_LEVELS=83.3%
+
+  全部通过: 是
+
+用例明细（期望块 → 是否命中）:
+  [VECTOR]
+    命中 firstRank=1 「长文档检索困境」 为什么固定长度切分会让跨段落的宏观问题答不好？
+    命中 firstRank=1 「RAPTOR核心思想」 RAPTOR 是怎么把文档组织成语义树的？
+    命中 firstRank=1 「分块策略取舍」 中文文档分块时块长度和重叠度取多少比较合适？
+    命中 firstRank=2 「UMAP参数」 UMAP 的 n_neighbors 和 min_dist 参数分别控制什么？
+    命中 firstRank=1 「GMM簇数」 GMM 聚类时最大簇数应该怎么限制？
+    命中 firstRank=1 「递归摘要与树」 摘要提示词为什么要严格约束？递归什么时候停止？
+    命中 firstRank=1 「混合检索RRF」 RRF 融合的平滑常数取多少，它的作用是什么？
+    命中 firstRank=1 「评估指标」 Recall@K、Hit Rate@K 和 MRR 分别衡量什么？
+    命中 firstRank=1 「异步与可观测性」 文档导入和建树为什么要做成异步任务？
+  [BM25]
+    命中 firstRank=1 「长文档检索困境」 为什么固定长度切分会让跨段落的宏观问题答不好？
+    命中 firstRank=1 「RAPTOR核心思想」 RAPTOR 是怎么把文档组织成语义树的？
+    命中 firstRank=1 「分块策略取舍」 中文文档分块时块长度和重叠度取多少比较合适？
+    命中 firstRank=1 「UMAP参数」 UMAP 的 n_neighbors 和 min_dist 参数分别控制什么？
+    命中 firstRank=1 「GMM簇数」 GMM 聚类时最大簇数应该怎么限制？
+    命中 firstRank=1 「递归摘要与树」 摘要提示词为什么要严格约束？递归什么时候停止？
+    命中 firstRank=1 「混合检索RRF」 RRF 融合的平滑常数取多少，它的作用是什么？
+    命中 firstRank=1 「评估指标」 Recall@K、Hit Rate@K 和 MRR 分别衡量什么？
+    命中 firstRank=1 「异步与可观测性」 文档导入和建树为什么要做成异步任务？
+  [HYBRID]
+    命中 firstRank=1 「长文档检索困境」 为什么固定长度切分会让跨段落的宏观问题答不好？
+    命中 firstRank=1 「RAPTOR核心思想」 RAPTOR 是怎么把文档组织成语义树的？
+    命中 firstRank=1 「分块策略取舍」 中文文档分块时块长度和重叠度取多少比较合适？
+    命中 firstRank=2 「UMAP参数」 UMAP 的 n_neighbors 和 min_dist 参数分别控制什么？
+    命中 firstRank=1 「GMM簇数」 GMM 聚类时最大簇数应该怎么限制？
+    命中 firstRank=1 「递归摘要与树」 摘要提示词为什么要严格约束？递归什么时候停止？
+    命中 firstRank=1 「混合检索RRF」 RRF 融合的平滑常数取多少，它的作用是什么？
+    命中 firstRank=1 「评估指标」 Recall@K、Hit Rate@K 和 MRR 分别衡量什么？
+    命中 firstRank=1 「异步与可观测性」 文档导入和建树为什么要做成异步任务？

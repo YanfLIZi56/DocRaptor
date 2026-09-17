@@ -3,14 +3,21 @@ pg:
   port: 5432
   user: doc_raptor
   password: 123456
-  database: DocRaptor
-
-redis:
-  host: localhost
-  port: 6379
-  database: 2
-#  password:
+  # 注意：实际存在的库是 doc_raptor_db（PG 18.6 + pgvector 0.8.6 + pg_search 0.25.6）
+  database: doc_raptor_db
 
 ai:
-  summaryPrompt: |
-    摘要压缩提示词: 压缩待补充
+  model:
+    chat:
+    embedding:
+  # RAPTOR 递归摘要的系统提示词：严格约束，禁止引入原文之外的信息
+  summary-prompt: |
+    你是一个严格的信息压缩器。请对用户提供的若干文本块做归纳总结。
+
+    必须遵守的规则：
+    1. 仅基于提供的文本块进行总结，禁止添加任何未在原文中出现的信息。
+    2. 只做信息压缩，不添加新事实、不补充背景知识、不做主观评价、不给出建议。
+    3. 保留原文中的关键实体、数字、专有名词与结论。
+    4. 如文本块之间存在矛盾，如实并列陈述，不要调和。
+    5. 输出为一段连贯的中文摘要，不要使用 Markdown 标题，不要写"根据以上内容"之类的套话。
+    6. 摘要长度控制在原文总字数的 20%~30%。

@@ -1,0 +1,45 @@
+spring:
+  application:
+    name: DocRaptor
+
+  profiles:
+    active: local
+
+  ai:
+    openai:
+      base-url: ${API_URL}
+      api-key: ${API_KEY}
+      chat:
+        model: qwen3.7-flash
+      embedding:
+        model: qwen3.7-text-embedding
+        dimensions: 1536
+
+  # 连接数据库
+  datasource:
+    url: jdbc:postgresql://${pg.host}:${pg.port}/${pg.database}
+    username: ${pg.user}
+    password: ${pg.password}
+    driver-class-name: org.postgresql.Driver
+
+  # 文件上传
+  servlet:
+    multipart:
+      # 单个文件大小
+      max-file-size: 10MB
+      # 设置总上传的文件大小
+      max-request-size: 20MB
+
+  data:
+    redis:
+      host: ${redis.host}
+      port: ${redis.port}
+      database: ${redis.database}
+      timeout: 10s
+
+# MyBatis配置
+mybatis:
+  # 配置mapper的扫描，找到所有的mapper.xml映射文件
+  mapper-locations: classpath*:mapper/**/*.xml
+  # 加载全局的配置文件
+  configLocation: classpath:mybatis/mybatis-config.xml

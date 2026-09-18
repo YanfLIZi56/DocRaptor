@@ -54,20 +54,49 @@ docraptor:
     min-chunk-chars: 32
     normalize-whitespace: true
   embedding:
-    batch-size: 32
+    # ⚠️ 服务端硬上限：本项目的 embedding 端点单次最多接受 20 条
+    # （实测 batch=20 成功、batch=21 起报 400 "batch size is invalid, it should not be larger than 20"）。
+    # 超大文档会切成几百块（实测 376 块），全靠这里的分批切片，不能一次全送。
+    batch-size: 16
     dimensions: 1536
     max-retries: 3
     retry-backoff-ms: 1000
     timeout-ms: 30000
   raptor:
     max-level: 3
-    min-cluster-size: 2
+    # 簇数上限约束：kMax = min(max-clusters, 绝对上限, n / min-cluster-size, n)，默认 8。
+    # 作用是把「局部阶段 kMax = n → BIC 选 k=n → 每点自成一簇」压住。
+    # ⚠️ 它只影响簇数上限；TreeBuildGuard 阈值与落库前小簇合并固定用 2（避免压掉树深/二次压低簇数）。
+    min-cluster-size: 1
     summary-concurrency: 4
     rebuild-on-conflict: true
+    # 降维方式：PCA（默认，确定性）/ UMAP（官方，但 Smile 侧无法播种）/ NONE（仅调试）。
+    # 官方 Python 的 umap.UMAP(...) 也没设 random_state，Smile 的 UMAP 连种子参数都没有 ——
+    # 实测同一份 313×1536 embedding 连跑 3 次输出逐位不同（k 在 2~12 跳变），树不可复现。
+    # 要复现官方随机行为可显式改成 UMAP。
+    reduction: PCA
+    # 官方 reduction_dimension = 10。改造前是 2（配合下面的硬顶把 313 块压成 3 个簇、树只剩 2 层）。
+    reduction-dimension: 10
+    # 官方 threshold = 0.1：软聚类，责任度 > 0.1 的簇**全部**归属（一个节点可属于多个簇）。
+    threshold: 0.1
+    # 官方两级聚类：全局降维+GMM → 逐全局簇再降维+再 GMM。这是此前完全缺失的一环。
+    two-stage: true
+    # 官方 max_length_in_cluster。语义：<0 关闭递归细分；0（默认）= 按块大小自动折算；>0 字面 token 数。
+    # ⚠️ 不要照搬官方的 3500：官方的 3500 是按它自己约 100 token 的块标定的（= 单簇约 35 块）。
+    # 我们的块是 700 中文字符 ≈ 470~670 token，照搬 3500 只容得下 5~7 块，递归细分会把簇切碎
+    # （313 块实测：3500 → 102 簇、24% 单节点簇；20000 → 47 簇、2% 单节点簇）。
+    max-cluster-tokens: 0
+    # 自动折算时「单簇可容纳的块数」：35 × 中位数(每块 token) ≈ 16k~23k
+    nodes-per-cluster-at-cap: 35
+    # true → 全局 n-neighbors = int(sqrt(n-1))（官方行为；n=313 → 17）。
+    auto-global-n-neighbors: true
+    global-n-neighbors: 0
+    # 官方局部 num_neighbors = 10。
+    local-n-neighbors: 10
     umap:
       enabled: true
       # ⚠️ 必须 < 当前层节点数：nNeighbors >= n 时 shouldReduce 为 false，会直接跳过降维。
-      # 一篇 6000 字文档按 600 字分块约 11 块，因此这里取 5。
+      # 仅在 auto-global-n-neighbors=false 且 reduction=UMAP 时作为全局值使用。
       n-neighbors: 5
       min-dist: 0.05
       # ⚠️ 目标维度受严格约束 2d+3 < n（Smile 4.1.0 谱初始化 NEV=2d+3）。
@@ -83,15 +112,25 @@ docraptor:
       # 注意：smile 4.1.0 的 smile.manifold.UMAP 没有随机种子参数，无法固定随机性
       random-state: 42
     gmm:
-      max-clusters: 8
-      # 簇数「绝对」上限：在 max-clusters 之上再压一层。
-      # ⚠️ 实测 BIC 在合成数据上随 k 单调下降、会一路选到上限，摘要会退化成对单个块的复述，
-      # 所以必须同时用 ceil(sqrt(n)) 与本值硬顶住（Lead 推荐 6）。
-      # 实际生效值 = max(2, min(max-clusters, absolute-max-clusters, ceil(sqrt(n))))。
-      absolute-max-clusters: 6
+      # 官方 max_clusters = 50（改造前是 8，配合下面的绝对硬顶把 313 块压成 3 个簇）。
+      max-clusters: 50
+      # 簇数「绝对」上限。默认 0 = 不设限（与官方一致）。
+      # 改造前默认 6，是为了堵住「Smile GMM 无法播种 + BIC 一路选到上限」；现在随机性已由
+      # DeterministicGmm 解决，这个硬顶反而有害（它正是「只有 3 个簇」的原因之一），故默认关闭。
+      absolute-max-clusters: 0
       min-clusters: 2
-      covariance-type: diagonal
+      # 协方差类型：full（默认，官方 sklearn 默认）/ diagonal。
+      # ⚠️ 必须 full：对角协方差每分量只要 2d 个参数，在「样本几十、维度 10」的局部子集上会被
+      # 「一个分量钉住一个点」的坍缩解骗过去（实测 logL 变正、50 个点切成 50 个单点簇）；
+      # 全协方差每分量 d + d(d+1)/2 个参数（d=10 时 55 个）足以压住。官方 sklearn 工具链同装置实测：
+      # 全协方差 → 43 簇、最大 11%；对角 → 315 簇、最大 3%。
+      covariance-type: full
       random-state: 42
+      # 拟合配置，默认逐项对应 sklearn GaussianMixture 的默认值。
+      standardize: false
+      max-iterations: 100
+      tolerance: 0.001
+      regularization: 0.000001
       selection: BIC
   summary:
     max-summary-chars: 400

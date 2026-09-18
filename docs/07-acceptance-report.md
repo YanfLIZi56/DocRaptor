@@ -2,7 +2,7 @@
 
 > 版本：v1.0 ｜ 产出：Lead ｜ 日期：2026-09-17
 > 被测对象：`D:\javaCode\DocRaptor`（Spring Boot 4.1.1 / Java 21 / PostgreSQL 18.6 + pgvector + pg_search / Vue 3）
-> 验收脚本：`scripts/acceptance.mjs` ｜ 原始输出：`docs/acceptance-run.txt`
+> 验收脚本：`scripts/acceptance.mjs`（可独立重跑，输出重定向到本地文件即可留档）
 
 ---
 
@@ -229,4 +229,4 @@ mvn -s maven-settings.xml -B test
 $env:DOCRAPTOR_IT="true"; mvn -s maven-settings.xml -B test
 ```
 
-完整原始输出见 `docs/acceptance-run.txt`。
+完整原始输出：重跑 `node scripts/acceptance.mjs` 获取（验收当时的输出文件未随仓库提交）。

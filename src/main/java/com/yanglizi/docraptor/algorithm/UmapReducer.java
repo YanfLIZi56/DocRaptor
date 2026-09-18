@@ -5,7 +5,11 @@ import smile.feature.extraction.PCA;
 import smile.manifold.UMAP;
 
 /**
- * 降维器：UMAP 为主，PCA 兜底。降维结果供 {@link GmmClusterer} 聚类。
+ * 降维器：UMAP 为主，PCA 兜底。降维结果供 {@link RaptorClusterer}（{@code reduction=UMAP} 时）使用。
+ *
+ * <p>⚠️ 本项目默认走 {@link RaptorClusterer} 内部的 PCA（确定性）；UMAP 仅作对照实验开关 ——
+ * Smile 4.1.0 的 UMAP <b>没有随机种子参数</b>，实测同输入连跑 3 次输出逐位不同。
+ * 历史上本类的输出曾喂给 {@link GmmClusterer}（已废弃）。
  *
  * <p><b>实测 API（smile-core 4.1.0，已用 javap 确认）</b>：
  * <pre>

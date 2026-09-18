@@ -19,12 +19,49 @@ import smile.stat.distribution.MultivariateGaussianMixture;
  * double     bic(double[][] data)
  * </pre>
  *
+ * <p><b>⚠️ BIC 方向（关键，曾长期搞反）</b>：Smile 的 {@code MultivariateMixture.bic(data)} 返回的是
+ * <pre>
+ *   logLikelihood - 0.5 * length() * Math.log(n)          // MultivariateMixture.java:213（已读源码）
+ * </pre>
+ * 而标准 BIC 是 {@code -2*logL + p*ln(n)}。两者相差 <b>−½ 倍</b>：
+ * <pre>
+ *   Smile.bic == -0.5 * 标准BIC      ⇒      Smile 的 bic() <b>越大越好，必须取 argmax</b>
+ * </pre>
+ * 改造前这里写的是 {@code r.bic() < best.bic()}（取最小值），方向正好反了 ——
+ * 于是每一层都选到「标准 BIC 最差」的 k，{{@code k=2}} 这类最小簇数几乎是必然结果。
+ * 这正是用户 VM 上「L0=313 → L1 只有 3 块」的主因之一（Lead 于 2026-09-18 定位）。
+ * {@code length()} 本身没问题：它返回 {@code (k-1) + Σ 分量.length()}，是真实自由参数数
+ * （{@code MultivariateMixture.java:180-187}），错的是符号约定，不是参数计数。
+ *
+ * <p><b>注意：本项目生产路径已不再走本类</b>（建树现在用
+ * {@link DeterministicGmm}/{@link RaptorClusterer}，那里自算标准 BIC 并取 argmin）。
+ * 本类保留为对照实验与历史兼容用途，但方向必须是对的，否则后人复制粘贴会再踩一次。
+ *
  * <p><b>簇数上限的实现方式</b>：在 {@code [kMin, kMax]} 区间内对每个 k 调 {@code fit(k, x)} 并比较
- * {@code bic(x)}，选 BIC 最小的 k（<b>BIC 越小越好</b>）。Smile 4.1.0 没有 {@code maxComponents} 这类参数。
+ * {@code bic(x)}，取 Smile bic <b>最大</b>的 k（等价于标准 BIC 最小）。
+ * Smile 4.1.0 没有 {@code maxComponents} 这类参数。
  *
  * <p><b>退化保护</b>：样本数 &lt; 3、kMax &lt; kMin、全部 k 拟合失败（协方差奇异等）时，
  * 一律降级为「单个簇」，不抛异常，保证建树递归一定能收敛（架构 5.1 的 {@code nClusters <= 1} 分支）。
+ *
+ * <h3>⚠️ 已废弃：生产路径不再使用本类</h3>
+ * 本类已被 {@link DeterministicGmm} + {@link RaptorClusterer} 取代，三条理由都是实测出来的：
+ * <ol>
+ *   <li><b>不可复现</b>：Smile 4.1.0 的 {@code MultivariateGaussianMixture.fit} 没有随机种子参数，
+ *       {@code MathEx.setSeed} 实测对它无效；同一份 313×1536 真实 embedding 连跑 10 次，
+ *       选出的 k 在 2~12 之间跳变（建树结果因此不可复现）；</li>
+ *   <li><b>BIC 符号约定易错</b>：Smile 的 {@code bic()} 是 {@code -BIC/2}（越大越好），
+ *       与标准 BIC（越小越好）相反 —— 本类历史上就在这里取错了方向；</li>
+ *   <li><b>没有 reg_covar 正则</b>：小样本 + 多分量时协方差奇异，直接刷
+ *       {@code LAPACK POTRF error code: 1}（实测）。</li>
+ * </ol>
+ * <b>当前状态</b>：{@code src/main} 中已无任何调用点（{@code ClusterPipeline} 走
+ * {@link RaptorClusterer} → {@link DeterministicGmm}）。<b>新代码不要再用它</b>；
+ * 保留仅为对照实验与历史参考，其 BIC 方向已修正为 argmax 并有守卫测试防止回退。
+ *
+ * @deprecated 用 {@link RaptorClusterer}（官方两级聚类）+ {@link DeterministicGmm}（确定性 GMM）替代。
  */
+@Deprecated(since = "2026-09-18", forRemoval = false)
 @Slf4j
 public final class GmmClusterer {
 
@@ -102,7 +139,8 @@ public final class GmmClusterer {
             if (r == null) {
                 continue;
             }
-            if (best == null || r.bic() < best.bic()) {
+            // ⚠️ Smile 的 bic() = -BIC/2，越大越好 → argmax（详见类注释；这里曾是 argmin，方向反了）
+            if (best == null || r.bic() > best.bic()) {
                 best = r;
             }
         }

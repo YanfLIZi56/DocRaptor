@@ -2,8 +2,9 @@ package com.yanglizi.docraptor.service;
 
 import com.yanglizi.docraptor.ai.AiGateway;
 import com.yanglizi.docraptor.algorithm.ClusterPipeline;
-import com.yanglizi.docraptor.algorithm.GmmClusterer;
+import com.yanglizi.docraptor.algorithm.RaptorClusterer;
 import com.yanglizi.docraptor.algorithm.SummaryPrompts;
+import com.yanglizi.docraptor.algorithm.TokenEstimator;
 import com.yanglizi.docraptor.algorithm.TreeBuildGuard;
 import com.yanglizi.docraptor.algorithm.UmapReducer;
 import com.yanglizi.docraptor.algorithm.VectorUtils;
@@ -69,8 +70,16 @@ public class RaptorTreeService {
         private int maxLevel = 3;
         private int umapNNeighbors = 10;
         private double umapMinDist = 0.1;
-        private int gmmMaxClusters = 8;
-        private String gmmCovarianceType = "diagonal";
+        private int gmmMaxClusters = 50;
+        /**
+         * 协方差类型。<b>默认 full</b>（官方 sklearn 默认）：对角协方差每个分量只要 {@code 2d} 个参数，
+         * 在「样本几十、维度 10」的局部子集上会被「一个分量钉住一个点」的坍缩解骗过去
+         * （实测 logL 变正、50 个点切成 50 个单点簇）；全协方差每分量 {@code d + d(d+1)/2} 个参数足以压住。
+         *
+         * <p>注意：请求体里显式传 {@code gmmCovarianceType=diagonal} 仍会被尊重（契约冻结），
+         * 但结果会退化成大量单节点簇，请谨慎。
+         */
+        private String gmmCovarianceType = "full";
         private String summaryPrompt;
 
         public static BuildParams defaults(DocRaptorProperties p) {
@@ -97,6 +106,15 @@ public class RaptorTreeService {
         private boolean forcedRoot;
         private long durationMs;
     }
+
+    /**
+     * {@link TreeBuildGuard} 的最小簇规模阈值：固定 2，<b>刻意不跟随</b>
+     * {@code docraptor.raptor.min-cluster-size}（后者只管簇数上限）。见调用点注释。
+     */
+    private static final int TREE_GUARD_MIN_CLUSTER_SIZE = 2;
+
+    /** 落库前「小簇并入最相似大簇」的阈值：固定 2，同样不跟随簇数上限配置。 */
+    private static final int MERGE_TINY_CLUSTER_SIZE = 2;
 
     /** 构建中的节点引用（内存态，避免反复查库）。 */
     private static class NodeRef {
@@ -181,6 +199,15 @@ public class RaptorTreeService {
             ClusterOutcome co = cluster(current, params);
             List<List<NodeRef>> groups = co.groups();
 
+            // 每层诊断日志（规格 §2-10）：n / reduction / dim / k / kMax / 簇规模分布 / 递归细分 / 软聚类多归属
+            log.info("建树第 {} 层聚类：n={} reduction={} dim={} k={} 全局簇={} kMax={} 递归细分={} 多归属={} 规模={}",
+                    level, current.size(), co.reduction(), co.dimension(), co.k(),
+                    co.globalClusterCount(), current.size() > 0 ? ClusterPipeline
+                            .effectiveKMax(current.size(), params.getGmmMaxClusters(),
+                                    props.getRaptor().getGmm().getAbsoluteMaxClusters(),
+                                    props.getRaptor().getMinClusterSize()) : 0,
+                    co.recursionSplits(), co.multiMembershipNodes(), describeSizes(co.clusterSizes()));
+
             // ---------- 层间收敛判定（TreeBuildGuard）----------
             // 命中任意一条就立刻停止向上递归，并把整层合并成「一个」父节点：
             //   · 这样保证树仍然有唯一根（契约 prefer hasUniqueRoot=true），而不是留下多个顶层节点
@@ -190,8 +217,11 @@ public class RaptorTreeService {
             for (List<NodeRef> g : groups) {
                 clusterSizes.add(g.size());
             }
+            // ⚠️ 这里刻意**不**用 props.raptor.min-cluster-size（它只管簇数上限，默认 8）：
+            //    TreeBuildGuard 的阈值只该拦「全是一节点簇」这种退化，用 2 就够。
+            //    若把 8 传进来，健康的层（最大簇 < 8）也会被判 NO_REAL_MERGE 而提前收根，**压掉树深**。
             TreeBuildGuard.Stop stop = TreeBuildGuard.reasonToStop(current.size(), clusterSizes,
-                    props.getRaptor().getMinClusterSize());
+                    TREE_GUARD_MIN_CLUSTER_SIZE);
             if (stop != null && stop != TreeBuildGuard.Stop.CONVERGED) {
                 log.info("建树第 {} 层触发收敛保护（{}：当前层 {} 个节点，簇规模 {}），本层合并为一个父节点后停止",
                         level, stop, current.size(), clusterSizes);
@@ -269,10 +299,13 @@ public class RaptorTreeService {
      * 一层的聚类产物：簇成员分组 + 本层实际使用的降维方式/维度/簇数。
      * 显式返回而不是存实例字段 —— {@code RaptorTreeService} 是单例，线程池里可能同时建两棵树的库。
      */
-    record ClusterOutcome(List<List<NodeRef>> groups, String reduction, int dimension, int k) {
+    record ClusterOutcome(List<List<NodeRef>> groups, String reduction, int dimension, int k,
+                          int globalClusterCount, int[] localCounts, int[] clusterSizes,
+                          int recursionSplits, int multiMembershipNodes) {
 
         static ClusterOutcome none() {
-            return new ClusterOutcome(List.of(), ClusterPipeline.REDUCTION_NONE, 0, 1);
+            return new ClusterOutcome(List.of(), ClusterPipeline.REDUCTION_NONE, 0, 1, 0,
+                    new int[0], new int[0], 0, 0);
         }
     }
 
@@ -286,18 +319,35 @@ public class RaptorTreeService {
     ClusterOutcome cluster(List<NodeRef> nodes, BuildParams params) {
         if (nodes.size() < 3) {
             int dim = nodes.isEmpty() ? 0 : nodes.get(0).vector.length;
-            return new ClusterOutcome(List.of(new ArrayList<>(nodes)), ClusterPipeline.REDUCTION_NONE, dim, 1);
+            return new ClusterOutcome(List.of(new ArrayList<>(nodes)), ClusterPipeline.REDUCTION_NONE, dim, 1,
+                    0, new int[0], new int[]{nodes.size()}, 0, 0);
         }
         double[][] x = new double[nodes.size()][];
+        // 官方 max_length_in_cluster 判断需要每个节点的 token 数（CJK 感知估算，官方用 tiktoken）
+        int[] tokenCounts = new int[nodes.size()];
         for (int i = 0; i < nodes.size(); i++) {
             x[i] = nodes.get(i).vector;
+            tokenCounts[i] = TokenEstimator.estimate(nodes.get(i).text);
         }
 
         var umapCfg = props.getRaptor().getUmap();
+        var gmmCfg = props.getRaptor().getGmm();
         ClusterPipeline.Params cp = new ClusterPipeline.Params();
-        cp.umapEnabled = umapCfg.isEnabled();
+        cp.reduction = props.getRaptor().getReduction();
+        cp.reductionDimension = props.getRaptor().getReductionDimension();
+        cp.threshold = props.getRaptor().getThreshold();
+        cp.maxClusters = params.getGmmMaxClusters();
+        cp.absoluteKMax = gmmCfg.getAbsoluteMaxClusters();
+        cp.minClusterSize = props.getRaptor().getMinClusterSize();
+        cp.maxClusterTokens = props.getRaptor().getMaxClusterTokens();
+        cp.nodesPerClusterAtCap = props.getRaptor().getNodesPerClusterAtCap();
+        cp.twoStage = props.getRaptor().isTwoStage();
+        cp.autoGlobalNNeighbors = props.getRaptor().isAutoGlobalNNeighbors();
+        cp.globalNNeighbors = props.getRaptor().getGlobalNNeighbors();
+        cp.localNNeighbors = props.getRaptor().getLocalNNeighbors();
+        cp.metric = umapCfg.getMetric();
+        cp.gmm = gmmCfg.toGmmConfig(params.getGmmCovarianceType());
         cp.nNeighbors = params.getUmapNNeighbors();
-        cp.targetDim = umapCfg.getNComponents();
         cp.epochs = umapCfg.getEpochs();
         cp.learningRate = umapCfg.getLearningRate();
         cp.minDist = params.getUmapMinDist();
@@ -305,64 +355,112 @@ public class RaptorTreeService {
         cp.negativeSamples = umapCfg.getNegativeSamples();
         cp.repulsionStrength = umapCfg.getRepulsionStrength();
         cp.localConnectivity = umapCfg.getLocalConnectivity();
-        cp.kMin = props.getRaptor().getGmm().getMinClusters();
-        cp.kMax = params.getGmmMaxClusters();
-        cp.absoluteKMax = props.getRaptor().getGmm().getAbsoluteMaxClusters();
-        cp.diagonal = !"full".equalsIgnoreCase(params.getGmmCovarianceType())
-                && !"tied".equalsIgnoreCase(params.getGmmCovarianceType());
-        cp.selection = props.getRaptor().getGmm().getSelection();
 
-        ClusterPipeline.Outcome outcome = ClusterPipeline.run(x, cp);
+        ClusterPipeline.Outcome outcome = ClusterPipeline.run(x, tokenCounts, cp);
 
         if (!outcome.canSplit()) {
             log.info("建树某层无法分裂（n={} reduction={} d={}：{}），本层合并为一个父节点",
                     nodes.size(), outcome.reduction(), outcome.dimension(), outcome.message());
-            return new ClusterOutcome(List.of(new ArrayList<>(nodes)), outcome.reduction(), outcome.dimension(), 1);
+            return new ClusterOutcome(List.of(new ArrayList<>(nodes)), outcome.reduction(), outcome.dimension(), 1,
+                    outcome.globalClusterCount(), outcome.localCounts(), outcome.clusterSizes(),
+                    outcome.recursionSplits(), 0);
         }
 
-        int[] labels = outcome.labels();
-        int minSize = Math.max(1, props.getRaptor().getMinClusterSize());
+        // 官方是软聚类（prob > threshold 的**全部**归属），所以同一节点可能落在多个簇里。
+        // 这里直接按簇收成员（而不是先压成硬标签），保证摘要覆盖到的成员与簇定义一致。
         List<List<NodeRef>> groups = new ArrayList<>();
-        List<NodeRef> smallOnes = new ArrayList<>();
-        for (int c = 0; c < outcome.k(); c++) {
-            List<NodeRef> members = new ArrayList<>();
-            for (int i = 0; i < labels.length; i++) {
-                if (labels[i] == c) {
-                    members.add(nodes.get(i));
+        List<NodeRef> covered = new ArrayList<>();
+        boolean[] seen = new boolean[nodes.size()];
+        for (List<Integer> cluster : outcome.clusters()) {
+            List<NodeRef> members = new ArrayList<>(cluster.size());
+            for (int idx : cluster) {
+                if (idx >= 0 && idx < nodes.size()) {
+                    members.add(nodes.get(idx));
+                    if (!seen[idx]) {
+                        seen[idx] = true;
+                        covered.add(nodes.get(idx));
+                    }
                 }
             }
-            if (members.isEmpty()) {
-                continue;
-            }
-            if (members.size() < minSize) {
-                smallOnes.addAll(members);
-            } else {
+            if (!members.isEmpty()) {
                 groups.add(members);
             }
         }
-        if (!smallOnes.isEmpty()) {
-            if (groups.isEmpty()) {
-                groups.add(new ArrayList<>(smallOnes));
-            } else {
-                // 小簇并入「与它首元素向量最相似」的大簇，避免出现大量单节点摘要
-                for (NodeRef member : smallOnes) {
-                    int best = 0;
-                    double bestSim = -Double.MAX_VALUE;
-                    for (int gi = 0; gi < groups.size(); gi++) {
-                        double sim = cosine(member.vector, groups.get(gi).get(0).vector);
-                        if (sim > bestSim) {
-                            bestSim = sim;
-                            best = gi;
-                        }
-                    }
-                    groups.get(best).add(member);
+        // 理论上不会发生（每个节点至少有一个标签），但绝不能让节点从树里消失
+        if (covered.size() < nodes.size()) {
+            for (int i = 0; i < nodes.size(); i++) {
+                if (!seen[i]) {
+                    covered.add(nodes.get(i));
                 }
             }
         }
-        if (groups.size() <= 1) {
-            return new ClusterOutcome(List.of(new ArrayList<>(nodes)), outcome.reduction(), outcome.dimension(), 1);
+
+        // ⚠️ 同样刻意不用 props.raptor.min-cluster-size（那是簇数上限，默认 8）：
+        //    落库前的小簇合并只针对「单节点簇」这种明显不划算的摘要，阈值 2 即可；
+        //    若跟着抬到 8，会和簇数上限叠加、二次压低簇数（实测 58 → 35 → 更少）。
+        if (MERGE_TINY_CLUSTER_SIZE > 1) {
+            groups = mergeTinyClusters(groups, MERGE_TINY_CLUSTER_SIZE);
         }
-        return new ClusterOutcome(groups, outcome.reduction(), outcome.dimension(), outcome.k());
+        if (groups.size() <= 1) {
+            return new ClusterOutcome(List.of(new ArrayList<>(nodes)), outcome.reduction(), outcome.dimension(), 1,
+                    outcome.globalClusterCount(), outcome.localCounts(), outcome.clusterSizes(),
+                    outcome.recursionSplits(), 0);
+        }
+        return new ClusterOutcome(groups, outcome.reduction(), outcome.dimension(), groups.size(),
+                outcome.globalClusterCount(), outcome.localCounts(), outcome.clusterSizes(),
+                outcome.recursionSplits(),
+                RaptorClusterer.countMultiMembership(outcome.clusters(), nodes.size()));
+    }
+
+    /** 簇规模分布摘要（只打前 12 个 + 总数，避免日志爆行）。 */
+    private static String describeSizes(int[] sizes) {
+        if (sizes == null || sizes.length == 0) {
+            return "[]";
+        }
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < Math.min(12, sizes.length); i++) {
+            if (i > 0) {
+                sb.append(',');
+            }
+            sb.append(sizes[i]);
+        }
+        if (sizes.length > 12) {
+            sb.append(",...共").append(sizes.length).append("个簇");
+        }
+        return sb.append(']').toString();
+    }
+
+    /** 把小簇并入「与它首元素向量最相似」的大簇，避免出现大量单节点摘要（{@code minClusterSize>1} 时启用）。 */
+    private List<List<NodeRef>> mergeTinyClusters(List<List<NodeRef>> groups, int minSize) {
+        List<List<NodeRef>> big = new ArrayList<>();
+        List<NodeRef> smallOnes = new ArrayList<>();
+        for (List<NodeRef> g : groups) {
+            if (g.size() < minSize) {
+                smallOnes.addAll(g);
+            } else {
+                big.add(g);
+            }
+        }
+        if (smallOnes.isEmpty()) {
+            return groups;
+        }
+        if (big.isEmpty()) {
+            big.add(new ArrayList<>(smallOnes));
+            return big;
+        }
+        for (NodeRef member : smallOnes) {
+            int best = 0;
+            double bestSim = -Double.MAX_VALUE;
+            for (int gi = 0; gi < big.size(); gi++) {
+                double sim = cosine(member.vector, big.get(gi).get(0).vector);
+                if (sim > bestSim) {
+                    bestSim = sim;
+                    best = gi;
+                }
+            }
+            big.get(best).add(member);
+        }
+        return big;
     }
 
     /* ============================== 摘要（并发） ============================== */
@@ -456,8 +554,21 @@ public class RaptorTreeService {
         gmmMeta.put("nComponents", co == null ? 1 : co.k());
         gmmMeta.put("clusterLabel", clusterLabel);
         gmmMeta.put("covarianceType", params.getGmmCovarianceType());
-        // 配置的簇数上限；实际生效值还会被 max(2, min(绝对上限, ceil(sqrt(n)))) 硬顶夹紧（见 ClusterPipeline.effectiveKMax）
+        // 配置的簇数上限；实际生效值 = min(maxClusters, 绝对上限, n / minClusterSize, n)（见 ClusterPipeline.effectiveKMax）
         gmmMeta.put("maxClusters", params.getGmmMaxClusters());
+        gmmMeta.put("reductionDimension", props.getRaptor().getReductionDimension());
+        gmmMeta.put("threshold", props.getRaptor().getThreshold());
+        gmmMeta.put("twoStage", props.getRaptor().isTwoStage());
+        if (co != null) {
+            // 官方两级聚类的诊断字段：全局簇数 / 各全局簇的局部簇数 / 是否触发超大簇递归细分 / 软聚类多归属数。
+            // 排查「树只有两层」时先看 globalClusterCount 与 clusterSizes（前者过小=全局阶段没分动，
+            // 后者出现单节点簇=局部阶段过度切分）。
+            gmmMeta.put("globalClusterCount", co.globalClusterCount());
+            gmmMeta.put("localClusterCounts", co.localCounts());
+            gmmMeta.put("clusterSizes", co.clusterSizes());
+            gmmMeta.put("recursionSplits", co.recursionSplits());
+            gmmMeta.put("multiMembershipNodes", co.multiMembershipNodes());
+        }
         meta.put("gmm", gmmMeta);
         List<String> sourceIds = new ArrayList<>(members.size());
         for (NodeRef m : members) {
@@ -474,6 +585,11 @@ public class RaptorTreeService {
     private List<NodeRef> persistAll(UUID kbId, UUID docId, List<PreparedSummary> prepared,
                                      List<List<NodeRef>> groups, int level) {
         List<NodeRef> out = new ArrayList<>(prepared.size());
+        // 官方是软聚类，同一节点可能属于多个簇（prob > threshold）——**摘要内容**要覆盖全部软成员。
+        // 但 summary_nodes.parent_id 是单值外键（DDL 已冻结），一个节点只能有一个父节点，
+        // 否则 updateParentForIds 会「后写的赢」，出现「父节点登记的 sourceNodeIds 与库里实际孩子不一致」。
+        // 折中：建父子边时按「簇下标最小者优先」取唯一父节点（确定性），多归属数量已写进 metadata。
+        java.util.Set<UUID> assignedParents = new java.util.HashSet<>();
         for (int label = 0; label < prepared.size(); label++) {
             PreparedSummary ps = prepared.get(label);
             SummaryNode node = new SummaryNode();
@@ -489,18 +605,20 @@ public class RaptorTreeService {
             node.setContent(ps.summary);
             node.setSummary(ps.summary);
             node.setCharCount(ps.summary.length());
-            node.setTokenCount(ps.summary.length() / 4);
+            node.setTokenCount(TokenEstimator.estimate(ps.summary));
             node.setEmbedding(VectorUtils.toLiteral(ps.vector));
             node.setClusterLabel(label);
             node.setClusterSize(ps.clusterSize);
             node.setMetadata(JsonUtils.toJson(ps.metadata));
             nodeMapper.insertSummary(node);
 
-            // 建立父子边：本簇成员的 parent_id 指向刚写入的摘要节点
+            // 建立父子边：本簇成员的 parent_id 指向刚写入的摘要节点（多归属时先到先得）
             if (groups != null && label < groups.size()) {
                 List<UUID> memberIds = new ArrayList<>(groups.get(label).size());
                 for (NodeRef m : groups.get(label)) {
-                    memberIds.add(m.id);
+                    if (m.id != null && assignedParents.add(m.id)) {
+                        memberIds.add(m.id);
+                    }
                 }
                 if (!memberIds.isEmpty()) {
                     nodeMapper.updateParentForIds(memberIds, node.getId());

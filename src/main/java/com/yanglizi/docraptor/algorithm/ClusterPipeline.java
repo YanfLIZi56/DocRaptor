@@ -2,46 +2,80 @@ package com.yanglizi.docraptor.algorithm;
 
 import lombok.extern.slf4j.Slf4j;
 
+import java.util.ArrayList;
+import java.util.List;
+
 /**
- * 「降维 → GMM 聚类」的完整流水线（纯算法，无 Spring / 无 DB，可直接单测）。
+ * 「降维 → 两级 GMM 聚类」流水线（纯算法，无 Spring / 无 DB，可直接单测）。
  *
- * <p>存在的理由：docs/00-environment-facts.md 第 10 节的两条硬约束 + 「BIC 在合成数据上随 k 单调下降」，
- * 必须集中在一处守住，否则很容易被无意改回「原始 1536 维直接喂 GMM」或「放任 BIC 选到 kMax」，
- * 结果就是建出一棵「N 个叶子 + 1 个根」的、完全没有层次的树 —— 而这个过程<b>不抛异常、不报错</b>，
- * 静默退化，纯逻辑单测也测不出来。
+ * <p>本类现在只是 <b>{@link RaptorClusterer} 的薄封装</b>：把配置层的参数翻译成
+ * {@link RaptorClusterer.Params}，再把结果翻回建树层要的形状。真正的官方对齐逻辑
+ * （全局降维+GMM → 逐全局簇局部降维+GMM → 软聚类 → 超大簇递归细分）在
+ * {@link RaptorClusterer} 里。
  *
- * <p>守住的四件事：
+ * <h3>为什么原来要「簇数硬顶」而现在不要了</h3>
+ * 改造前这里有一个 {@code kMax = max(2, min(configuredMax, 绝对上限 6, ceil(sqrt(n))))} 的硬顶。
+ * 它是为了堵住一个真实故障：Smile 的 GMM <b>无法播种</b>（同输入连跑 10 次 k 在 2~12 跳变），
+ * 且 BIC 会一路选到上限，于是树只剩「N 个叶子 + 1 个根」。
+ *
+ * <p>现在根因已经解决（{@link DeterministicGmm} 确定性 + 全协方差），官方参数本身就能给出
+ * 合理的簇数，因此硬顶被<b>移除</b>：{@code kMax = min(maxClusters, 绝对上限, n / minClusterSize, n)}，
+ * 与官方 {@code max_clusters = min(50, len(embeddings))} 一致（绝对上限默认 0 = 不限）。
+ * 硬顶曾经把 313 块的《三体》压成 3 个全局簇 —— 也就是「树只有 2 层」的直接原因。
+ *
+ * <p>仍然守住的底线：
  * <ol>
- *   <li>降维结果必须是 GMM 吃得下的低维（{@link UmapReducer#gmmSafe}），
- *       <b>绝不把原始 1536 维送进 {@link GmmClusterer}</b>（送进去必然 LAPACK POTRF 异常 → 退化成单簇）；</li>
- *   <li>UMAP 失败时用 PCA 兜底，而不是回退原始维度；</li>
+ *   <li><b>绝不把原始 1536 维送进 GMM</b>（必然 LAPACK POTRF 异常 → 退化成单簇），
+ *       一律先降维（{@link #REDUCTION_PCA} 或 {@link #REDUCTION_UMAP}）；</li>
  *   <li>降维彻底不可用时返回 {@code k=1}，由上层把整层合并成一个父节点（保证递归收敛，不抛异常）；</li>
- *   <li>对簇数上限设硬顶 {@code kMax = max(2, min(configuredMax, ceil(sqrt(n))))}，不让 BIC 自由搜索到上限。</li>
+ *   <li>任何异常都不外泄。</li>
  * </ol>
  */
 @Slf4j
 public final class ClusterPipeline {
 
     /** 降维方式，写进 summary_nodes.metadata 便于排查「为什么树没层次」。 */
-    public static final String REDUCTION_UMAP = "UMAP";
-    public static final String REDUCTION_PCA = "PCA";
-    public static final String REDUCTION_NONE = "NONE";
-
-    /**
-     * 簇数绝对上限默认值（Lead 推荐：{@code kMax = max(2, min(6, ceil(sqrt(n))))}）。
-     * 存在的理由：实测 BIC 在合成数据上随 k 单调下降，放任它自由搜索就会一路选到上限，
-     * 于是摘要退化成对单个块的复述；必须同时用 sqrt(n) 和这个绝对上限把它压住。
-     */
-    public static final int DEFAULT_ABSOLUTE_KMAX = 6;
+    public static final String REDUCTION_UMAP = RaptorClusterer.REDUCTION_UMAP;
+    public static final String REDUCTION_PCA = RaptorClusterer.REDUCTION_PCA;
+    public static final String REDUCTION_NONE = RaptorClusterer.REDUCTION_NONE;
 
     private ClusterPipeline() {
     }
 
     /** 配置参数（由 DocRaptorProperties 映射过来，保持算法层与 config 层解耦）。 */
     public static class Params {
-        public boolean umapEnabled = true;
+        /** 降维方式：PCA（默认，确定性）/ UMAP（官方，但 Smile 侧无法播种）/ NONE（仅调试）。 */
+        public String reduction = RaptorClusterer.REDUCTION_PCA;
+        /** 官方 reduction_dimension = 10。 */
+        public int reductionDimension = 10;
+        /** 官方 threshold = 0.1（软聚类偏好阈值）。 */
+        public double threshold = 0.1;
+        /** 官方 max_clusters = 50。 */
+        public int maxClusters = 50;
+        /** 簇数绝对上限；&lt;=0 表示不限（默认 0 = 与官方一致）。 */
+        public int absoluteKMax = 0;
+        /** 最小簇规模约束（簇数上限 {@code n/minClusterSize}），默认 8。见 {@link RaptorClusterer.Params#minClusterSize}。 */
+        public int minClusterSize = 8;
+        /**
+         * 官方 {@code max_length_in_cluster}。语义：{@code <0} 关闭递归细分；{@code 0}（默认）
+         * 按块大小<b>自动折算</b>（官方的 3500 是按 ≈100 token 的块标定的，照搬到中文长块会把簇切碎）；
+         * {@code >0} 字面 token 数。
+         */
+        public int maxClusterTokens = 0;
+        /** 自动折算时「单簇可容纳的块数」（对应官方的 3500/≈100 ≈ 35 块）。 */
+        public int nodesPerClusterAtCap = 35;
+        /** 两级聚类开关（false 仅用于对照实验）。 */
+        public boolean twoStage = true;
+        /** true → 全局 nNeighbors = int(sqrt(n-1))（官方行为）。 */
+        public boolean autoGlobalNNeighbors = true;
+        public int globalNNeighbors = 0;
+        /** 官方局部 num_neighbors = 10。 */
+        public int localNNeighbors = 10;
+        public String metric = "cosine";
+        /** GMM 拟合配置（默认 = 官方 sklearn 默认：全协方差、不标准化、reg_covar=1e-6）。 */
+        public DeterministicGmm.Config gmm = DeterministicGmm.Config.official();
+        // ---- 仅在 reduction=UMAP 时生效 ----
         public int nNeighbors = 5;
-        public int targetDim = 2;
         public int epochs = 200;
         public double learningRate = 1.0;
         public double minDist = 0.05;
@@ -49,108 +83,143 @@ public final class ClusterPipeline {
         public int negativeSamples = 5;
         public double repulsionStrength = 1.0;
         public double localConnectivity = 1.0;
-        public int kMin = 2;
-        public int kMax = 8;
-        /** 簇数绝对上限，独立于 kMax 配置值再压一层（Lead 推荐 6）。 */
-        public int absoluteKMax = DEFAULT_ABSOLUTE_KMAX;
-        public boolean diagonal = true;
-        public String selection = "BIC";
     }
 
     /**
-     * @param labels    每个样本的簇标签；{@code k=1} 时全为 0
-     * @param k         簇数；1 表示「无法分裂，整层合并」
-     * @param reduction UMAP / PCA / NONE
-     * @param dimension <b>实际喂给 GMM 的维度</b>；{@code 0} 表示压根没进聚类
-     *                  （无法安全降维 → 本层直接合并成一个父节点）。
-     *                  这样写是为了避免出现「dimension=1536 且 reduction=NONE」这种看起来像 bug 的元数据
-     *                  —— 那种情况恰恰说明我们把 1536 维挡住了，没有送进 GMM。
-     * @param kMaxUsed  实际生效的簇数上限（已被 sqrt 硬顶夹紧）
+     * 聚类结果。
+     *
+     * @param clusters         每个簇的成员下标（升序）。<b>软聚类下同一节点可以出现在多个簇里</b>
+     *                         （官方 {@code prob > threshold} 的全部归属），因此各簇大小之和 ≥ n。
+     * @param k                簇数（{@code clusters.size()}）；1 表示「无法分裂，整层合并」
+     * @param reduction        PCA / UMAP / NONE
+     * @param dimension        <b>实际喂给 GMM 的维度</b>；0 表示压根没进聚类（无法安全降维 → 本层合并）
+     * @param kMaxUsed         实际生效的簇数上限
+     * @param globalClusterCount 全局阶段分出的簇数（诊断：它≈0.x 时说明局部阶段没起作用）
+     * @param localCounts      各全局簇的局部簇数
+     * @param clusterSizes     簇规模降序（诊断：一眼看出有没有超大簇/单节点簇）
+     * @param recursionSplits  「总 token 超限 → 递归细分」触发的次数
      */
-    public record Outcome(int[] labels, int k, String reduction, int dimension,
-                          int kMaxUsed, double bic, boolean degraded, String message) {
+    public record Outcome(List<List<Integer>> clusters, int k, String reduction, int dimension,
+                          int kMaxUsed, double bic, boolean degraded, String message,
+                          int globalClusterCount, int[] localCounts, int[] clusterSizes,
+                          int recursionSplits, int maxClusterTokensUsed) {
 
         public boolean canSplit() {
             return k > 1;
         }
+
+        /** 硬标签（首个命中的簇）；仅为兼容旧调用方，建树请直接用 {@link #clusters()}。 */
+        public int[] labels() {
+            if (clusters == null || clusters.isEmpty()) {
+                return new int[0];
+            }
+            int n = 0;
+            for (List<Integer> c : clusters) {
+                for (int idx : c) {
+                    n = Math.max(n, idx + 1);
+                }
+            }
+            int[] out = new int[n];
+            java.util.Arrays.fill(out, -1);
+            for (int c = 0; c < clusters.size(); c++) {
+                for (int idx : clusters.get(c)) {
+                    if (out[idx] < 0) {
+                        out[idx] = c;
+                    }
+                }
+            }
+            for (int i = 0; i < n; i++) {
+                if (out[i] < 0) {
+                    out[i] = 0;
+                }
+            }
+            return out;
+        }
     }
 
-    /**
-     * 簇数硬顶：{@code max(2, min(kMax配置值, 绝对上限, ceil(sqrt(n))))}，且不超过样本数。
-     *
-     * <p>用默认绝对上限 6（Lead 推荐）。n=11（验收文档的块数）→ ceil(sqrt(11))=4 → 取 4；
-     * n=40 → ceil(sqrt(40))=7，但被绝对上限压到 6。
-     */
+    /** 簇数上限：{@code min(maxClusters, 绝对上限, n / minClusterSize, n)}（与官方 {@code min(50, n)} 同族）。 */
     public static int effectiveKMax(int sampleCount, int configuredMax) {
-        return effectiveKMax(sampleCount, configuredMax, DEFAULT_ABSOLUTE_KMAX);
+        return effectiveKMax(sampleCount, configuredMax, 0, 1);
     }
 
     public static int effectiveKMax(int sampleCount, int configuredMax, int absoluteMax) {
-        int bySqrt = (int) Math.ceil(Math.sqrt(Math.max(1, sampleCount)));
-        int cap = Math.max(2, Math.min(Math.min(configuredMax, absoluteMax), bySqrt));
-        return Math.min(cap, Math.max(1, sampleCount));
+        return effectiveKMax(sampleCount, configuredMax, absoluteMax, 1);
+    }
+
+    public static int effectiveKMax(int sampleCount, int configuredMax, int absoluteMax, int minClusterSize) {
+        return RaptorClusterer.effectiveKMax(sampleCount, configuredMax, absoluteMax, minClusterSize);
+    }
+
+    /** 无 token 信息时跑流水线（等价于关闭超大簇递归细分）。 */
+    public static Outcome run(double[][] raw, Params p) {
+        return run(raw, null, p);
     }
 
     /**
      * 跑完整流水线。任何情况下都不抛异常。
+     *
+     * @param tokenCounts 每个节点的 token 数（官方 {@code max_length_in_cluster} 用它判断是否需要递归细分）；
+     *                    null 或长度不符时跳过该步
      */
-    public static Outcome run(double[][] raw, Params p) {
+    public static Outcome run(double[][] raw, int[] tokenCounts, Params p) {
         if (raw == null || raw.length == 0) {
-            return new Outcome(new int[0], 1, REDUCTION_NONE, 0, 1, Double.NaN, true, "无样本");
+            return single(0, REDUCTION_NONE, 0, 0, "无样本");
         }
         int n = raw.length;
         int rawDim = raw[0].length;
         if (n < 3) {
             // 节点太少：直接合并成一个父节点（架构 5.1 的 nClusters<=1 分支）
-            return new Outcome(zeros(n), 1, REDUCTION_NONE, 0, 1, Double.NaN, true,
-                    "样本数 " + n + " < 3，直接合并");
+            return single(n, REDUCTION_NONE, 0, 0, "样本数 " + n + " < 3，直接合并");
         }
+        try {
+            RaptorClusterer.Params rp = new RaptorClusterer.Params();
+            rp.reduction = p.reduction;
+            rp.reductionDimension = p.reductionDimension;
+            rp.threshold = p.threshold;
+            rp.maxClusters = p.maxClusters;
+            rp.absoluteMaxClusters = p.absoluteKMax;
+            rp.minClusterSize = p.minClusterSize;
+            rp.maxClusterTokens = p.maxClusterTokens;
+            rp.nodesPerClusterAtCap = p.nodesPerClusterAtCap;
+            rp.twoStage = p.twoStage;
+            rp.autoGlobalNNeighbors = p.autoGlobalNNeighbors;
+            rp.globalNNeighbors = p.globalNNeighbors;
+            rp.localNNeighbors = p.localNNeighbors;
+            rp.metric = p.metric;
+            rp.gmm = p.gmm;
+            rp.umapEpochs = p.epochs;
+            rp.umapMinDist = p.minDist;
+            rp.umapLearningRate = p.learningRate;
+            rp.umapSpread = p.spread;
+            rp.umapNegativeSamples = p.negativeSamples;
+            rp.umapRepulsionStrength = p.repulsionStrength;
+            rp.umapLocalConnectivity = p.localConnectivity;
 
-        // ---------- 1. 降维（UMAP → PCA → 放弃） ----------
-        double[][] matrix = raw;
-        String reduction = REDUCTION_NONE;
-        int safeDim = UmapReducer.safeTargetDim(n, p.targetDim);
+            RaptorClusterer.Result r = RaptorClusterer.cluster(raw, tokenCounts, rp);
 
-        if (safeDim >= 2) {
-            double[][] umap = p.umapEnabled
-                    ? UmapReducer.tryUmap(raw, p.nNeighbors, p.targetDim, p.epochs, p.learningRate,
-                    p.minDist, p.spread, p.negativeSamples, p.repulsionStrength, p.localConnectivity)
-                    : null;
-            if (umap != null && UmapReducer.gmmSafe(umap)) {
-                matrix = umap;
-                reduction = REDUCTION_UMAP;
-            } else {
-                double[][] pca = UmapReducer.tryPca(raw, safeDim);
-                if (pca != null && UmapReducer.gmmSafe(pca)) {
-                    matrix = pca;
-                    reduction = REDUCTION_PCA;
-                    log.info("降维走 PCA 兜底（n={} rawDim={} → d={}）", n, rawDim, pca[0].length);
-                }
+            if (r.clusters.isEmpty() || r.k() <= 1) {
+                return single(n, r.reduction, r.dimension, r.kMaxUsed,
+                        "聚类未产出多个簇：" + r.note);
             }
+            return new Outcome(r.clusters, r.k(), r.reduction, r.dimension, r.kMaxUsed,
+                    Double.NaN, r.degenerate, r.note, r.globalClusterCount, r.localCounts,
+                    r.clusterSizes, r.recursionSplits, r.maxClusterTokensUsed);
+        } catch (Throwable t) {
+            // 兜底：聚类异常绝不能让建树失败（树必须收敛到一个根）
+            log.warn("聚类异常，本层合并为一个父节点：{}", t.toString());
+            return single(n, REDUCTION_NONE, 0, effectiveKMax(n, p.maxClusters, p.absoluteKMax, p.minClusterSize),
+                    "聚类异常降级：" + t);
         }
-
-        // ---------- 2. 安全闸门：绝不让高维/奇异矩阵进 GMM ----------
-        if (!UmapReducer.gmmSafe(matrix)) {
-            log.warn("降维不可用（n={} rawDim={}），本层不聚类、直接合并为一个父节点；GMM 未被调用",
-                    n, rawDim);
-            return new Outcome(zeros(n), 1, REDUCTION_NONE, 0,
-                    effectiveKMax(n, p.kMax), Double.NaN, true,
-                    "无法安全降维（rawDim=" + rawDim + "），本层合并为一个父节点，未调用 GMM");
-        }
-
-        // ---------- 3. GMM 聚类（簇数硬顶，不让 BIC 自由搜索） ----------
-        int kMax = effectiveKMax(n, p.kMax, p.absoluteKMax);
-        int kMin = Math.max(2, Math.min(p.kMin, kMax));
-        GmmClusterer.Result res = GmmClusterer.safeCluster(matrix, kMin, kMax, p.diagonal, p.selection);
-
-        if (res.k() <= 1) {
-            return new Outcome(zeros(n), 1, reduction, matrix[0].length, kMax, res.bic(), true,
-                    "GMM 判定无法分裂：" + res.message());
-        }
-        return new Outcome(res.labels(), res.k(), reduction, matrix[0].length, kMax, res.bic(), false, "ok");
     }
 
-    private static int[] zeros(int n) {
-        return new int[Math.max(0, n)];
+    private static Outcome single(int n, String reduction, int dimension, int kMaxUsed, String message) {
+        List<List<Integer>> clusters = new ArrayList<>(1);
+        List<Integer> all = new ArrayList<>(Math.max(0, n));
+        for (int i = 0; i < n; i++) {
+            all.add(i);
+        }
+        clusters.add(all);
+        return new Outcome(clusters, 1, reduction, dimension, kMaxUsed, Double.NaN, true, message,
+                0, new int[0], new int[]{n}, 0, 0);
     }
 }

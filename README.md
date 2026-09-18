@@ -37,12 +37,84 @@ DocRaptor is a local standalone **RAPTOR (Recursive Abstractive Processing for T
 
 ### Prerequisites
 
-- JDK 21+
-- Maven 3.9+
-- Node.js 22+
-- PostgreSQL 18.6 with `pgvector` and `pg_search` extensions
+- Docker environment
+- Docker Compose environment
 
-### 1. Clone & Build
+### Docker Deployment
+
+#### 1. Prepare Project Directory
+
+Create the following directory structure in the project root:
+
+```
+Project Root
+├─ Dockerfile
+├─ docker-compose.yml
+├─ app
+│   ├─ DocRaptor.jar      # Packaged JAR file
+│   └─ config
+│       └─ application.yml # Configuration file
+├─ nginx
+│   ├─ nginx.conf
+│   └─ dist
+│       └─ index.html     # Frontend page
+└─ pg-init
+    └─ init.sql           # Database init script (from docs/02-schema.sql)
+```
+
+#### 2. Build PostgreSQL Image (Separate Build)
+
+Since Dockerfile-pgsql contains compilation steps and network requests, build it separately:
+
+```bash
+# Build PostgreSQL image with pgvector extension
+docker build -t my-paradedb-pgvector -f Dockerfile-pgsql .
+```
+
+#### 3. Configure Application
+
+Create `app/config/application.yml` with database connection:
+
+```yaml
+spring:
+  datasource:
+    url: jdbc:postgresql://pgsql:5432/doc_raptor_db
+    username: postgres
+    password: 123456
+  ...
+```
+
+#### 4. One-Click Start
+
+```bash
+# Execute in project root
+docker compose up -d
+```
+
+#### 5. Verify Services
+
+- Nginx Frontend: http://localhost:80
+- API: http://localhost:8080 (internal network)
+
+#### Stop Services
+
+```bash
+docker compose down
+
+# If you need to initialize the database
+docker compose down -v
+```
+
+To rebuild images:
+
+```bash
+docker compose build --no-cache
+docker compose up -d
+```
+
+### Development Environment
+
+**Prerequisites**
 
 ```bash
 git clone https://github.com/yourusername/DocRaptor.git

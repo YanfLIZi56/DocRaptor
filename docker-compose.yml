@@ -1,0 +1,47 @@
+services:
+  docraptor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: doc-raptor:latest
+    restart: always
+    volumes:
+      - ./app/config:/app/config
+    # 不暴露端口，仅compose内部网络访问
+    depends_on:
+      - pgsql
+
+  nginx:
+    image: nginx:latest
+    restart: always
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf
+      - ./nginx/dist:/usr/share/nginx/html
+    ports:
+      - "80:80"
+    depends_on:
+      - docraptor
+
+  pgsql:
+    # 这个镜像需要包含 pgvector 扩展和 pg_search 扩展
+    image: my-paradedb-pgvector
+    container_name: pgsql-docraptor
+    restart: always
+    # 不映射端口到宿主机
+    # ports:
+    #   - "5432:5432"
+    volumes:
+      # 持久化数据库数据
+      - DocRaptor-pgdata:/var/lib/postgresql
+      # 初始化脚本：首次启动自动执行
+      - ./pg-init:/docker-entrypoint-initdb.d
+    # 字符集
+    environment:
+      TZ: Asia/Shanghai
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 123456
+      POSTGRES_DB: doc_raptor_db
+
+volumes:
+  DocRaptor-pgdata:
+

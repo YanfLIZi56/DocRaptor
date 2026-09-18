@@ -1,0 +1,27 @@
+# 使用 ParadeDB 官方镜像作为基础
+FROM paradedb/paradedb:latest
+
+# 切换到 root 用户安装依赖
+USER root
+
+# 1. 安装编译 pgvector 所需的依赖
+RUN apt-get update && apt-get install -y \
+    postgresql-server-dev-18 \
+    build-essential \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. 下载并编译 pgvector
+WORKDIR /tmp
+RUN git clone https://github.com/pgvector/pgvector.git \
+    && cd pgvector \
+    && make \
+    && make install
+
+# 3. 清理编译临时文件（减小镜像体积）
+RUN rm -rf /tmp/pgvector \
+    && apt-get remove -y git build-essential \
+    && apt-get autoremove -y
+
+# 4. 切换回 postgres 用户
+USER postgres

@@ -37,6 +37,85 @@ DocRaptor 是一个本地单机运行的 **RAPTOR (Recursive Abstractive Process
 
 ### 前置条件
 
+- Docker 环境
+- Docker Compose 环境
+
+### Docker 一键部署
+
+#### 1. 准备项目目录
+
+在项目根目录下创建以下目录和文件结构：
+
+```
+项目根目录
+├─ Dockerfile
+├─ docker-compose.yml
+├─ app
+│   ├─ DocRaptor.jar      # 打包后的jar文件
+│   └─ config
+│       └─ application.yml # 配置文件
+├─ nginx
+│   ├─ nginx.conf
+│   └─ dist
+│       └─ index.html     # 前端页面
+└─ pg-init
+    └─ init.sql           # 数据库初始化脚本(来自 docs/02-schema.sql)
+```
+
+#### 2. 构建 PostgreSQL 镜像（单独构建）
+
+由于 Dockerfile-pgsql 包含编译步骤和网络请求，建议单独构建：
+
+```bash
+# 构建包含 pgvector 扩展的 PostgreSQL 镜像
+docker build -t my-paradedb-pgvector -f Dockerfile-pgsql .
+```
+
+#### 3. 配置应用
+
+在 `app/config/application.yml` 中自定义配置：
+
+```yaml
+spring:
+  datasource:
+    url: jdbc:postgresql://pgsql:5432/doc_raptor_db
+    username: postgres
+    password: 123456
+  ...
+```
+
+#### 4. 一键启动
+
+```bash
+# 在项目根目录下执行
+docker compose up -d
+```
+
+#### 5. 验证服务
+
+- Nginx 前端：http://localhost:80
+- API 接口：http://localhost:8080（内部网络）
+
+#### 停止服务
+
+```bash
+docker compose down
+
+# 如需初始化数据库
+docker compose down -v
+```
+
+如需重新构建镜像：
+
+```bash
+docker compose build --no-cache
+docker compose up -d
+```
+
+## 🖥️开发环境部署
+
+### 前置条件
+
 - JDK 21+
 - Maven 3.9+
 - Node.js 22+

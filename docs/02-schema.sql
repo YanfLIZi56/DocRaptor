@@ -51,7 +51,7 @@ CREATE TABLE knowledge_base (
     -- 统计冗余字段，由服务层在导入/删文档后维护
     document_count      INTEGER      NOT NULL DEFAULT 0,
     node_count          INTEGER      NOT NULL DEFAULT 0,
-    embedding_model     VARCHAR(64)  NOT NULL DEFAULT 'qwen3.7-text-embedding',
+    embedding_model     VARCHAR(64)  NOT NULL DEFAULT '不知道啊',
     embedding_dimension INTEGER      NOT NULL DEFAULT 1536,
     created_at          TIMESTAMPTZ  NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ  NOT NULL DEFAULT now(),
@@ -71,7 +71,7 @@ COMMENT ON COLUMN knowledge_base.chunk_overlap       IS '相邻块重叠字符�
 COMMENT ON COLUMN knowledge_base.chunk_strategy      IS '分块策略：FIXED_SIZE(定长滑窗) / PARAGRAPH(按空行段落聚合) / RECURSIVE(递归按 段落>句号>换行 切分)。默认 FIXED_SIZE';
 COMMENT ON COLUMN knowledge_base.document_count      IS '该知识库下未删除的文档数量（冗余统计，服务层维护）';
 COMMENT ON COLUMN knowledge_base.node_count          IS '该知识库下 summary_nodes 总行数，含叶子块与摘要节点（冗余统计）';
-COMMENT ON COLUMN knowledge_base.embedding_model     IS '向量模型名，固定 qwen3.7-text-embedding';
+COMMENT ON COLUMN knowledge_base.embedding_model     IS '向量模型名';
 COMMENT ON COLUMN knowledge_base.embedding_dimension IS '向量维度，固定 1536，必须与 summary_nodes.embedding 的 vector(1536) 一致';
 COMMENT ON COLUMN knowledge_base.created_at          IS '创建时间';
 COMMENT ON COLUMN knowledge_base.updated_at          IS '最后更新时间，由触发器自动维护';

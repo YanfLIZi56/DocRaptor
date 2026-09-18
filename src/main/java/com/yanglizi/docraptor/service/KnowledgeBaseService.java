@@ -18,6 +18,7 @@ import com.yanglizi.docraptor.mapper.EvalCaseMapper;
 import com.yanglizi.docraptor.mapper.KnowledgeBaseMapper;
 import com.yanglizi.docraptor.mapper.SummaryNodeMapper;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -54,6 +55,9 @@ public class KnowledgeBaseService {
         this.asyncTaskMapper = asyncTaskMapper;
         this.props = props;
     }
+
+    @Value("${ai.model.embedding}")
+    private String embedModel;
 
     @Transactional
     public KnowledgeBaseVO create(KnowledgeBaseCreateRequest req) {
@@ -93,7 +97,7 @@ public class KnowledgeBaseService {
         kb.setChunkStrategy(strategy);
         kb.setDocumentCount(0);
         kb.setNodeCount(0);
-        kb.setEmbeddingModel("qwen3.7-text-embedding");
+        kb.setEmbeddingModel(embedModel);
         kb.setEmbeddingDimension(props.getEmbedding().getDimensions());
         try {
             kbMapper.insert(kb);
